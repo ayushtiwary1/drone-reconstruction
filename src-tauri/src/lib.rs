@@ -138,15 +138,19 @@ fn run_reconstruction(app: tauri::AppHandle, video_path: String, telemetry_path:
                 let z_depth = 20.0 + (1.0 - normalized_inv) * 15.0; 
 
                 // 1. Calculate standard physical dimensions
-                let lateral = ((x as f32 - cx) * z_depth / 200.0) + dx;
-                let elevation = -((y as f32 - cy) * z_depth / 200.0) - dy_alt;
-                let forward = z_depth + (dz_fwd * 0.85); 
+                // 1. Calculate continuous ground-plane dimensions
+        let lateral = ((x as f32 - cx) * z_depth / 200.0) + dx;
+        
+        // Map the drone's forward flight to the image's vertical projection (Ground Z)
+        let ground_z = ((y as f32 - cy) * z_depth / 200.0) - (dz_fwd * 0.95); 
+        
+        // Optical depth becomes height. Closer objects (trees) stand taller than ground
+        let height = -z_depth - dy_alt; 
 
-                // 2. Pre-warp axes for Three.js 
-                // This perfectly solves the Left/Right flip and stops the Z-plane staircasing
-                let ply_x = -lateral; 
-                let ply_y = forward;  
-                let ply_z = elevation; 
+        // 2. Map directly to Three.js default axes (Y-up, right-handed)
+        let ply_x = lateral; 
+        let ply_y = height;  
+        let ply_z = ground_z;
 
                 let pixel = resized_img.get_pixel(x as u32, y as u32);
                 point_count += 1;

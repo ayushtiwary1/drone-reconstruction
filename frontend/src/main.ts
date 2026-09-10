@@ -39,9 +39,11 @@ loader.load(
         const pointCloud = new THREE.Points(geometry, material);
         
         geometry.computeBoundingBox();
-        const center = geometry.boundingBox!.getCenter(new THREE.Vector3());
-        pointCloud.position.sub(center);
-        pointCloud.rotation.x = -Math.PI / 2; 
+        const bbox = geometry.boundingBox!;
+        const offsetX = -(bbox.min.x + bbox.max.x) / 2;
+        const offsetZ = -(bbox.min.z + bbox.max.z) / 2;
+        const offsetY = -bbox.min.y;
+        geometry.translate(offsetX, offsetY, offsetZ);
         
         scene.add(pointCloud);
         logBox.innerHTML += `\n<span style="color:#4ade80;">[SUCCESS] Rendered Initial Points.</span>`;
@@ -130,16 +132,14 @@ runBtn.addEventListener('click', async () => {
 
         scene.children = scene.children.filter(c => !(c instanceof THREE.Points));
 
-        loader.load('/recon_output.ply?v=' + Date.now(), (geometry) => {
+            loader.load('/recon_output.ply?v=' + Date.now(), (geometry) => {
             
             // 1. Scale the geometry
             geometry.scale(1.2, 1.2, 1.2);
             
-            // 2. ONLY rotate X to map the backend's 'forward' (PLY Y) to Three.js depth (-Z)
-            // Removed the rotateZ and scale(1, -1, 1) that were mangling the stackment
-            geometry.rotateX(-Math.PI / 2);
+            // NO ROTATIONS AT ALL. The Rust backend now outputs perfect coordinates.
             
-            // 3. Center and drop to grid floor
+            // 2. Center and drop to grid floor
             geometry.computeBoundingBox();
             const bbox = geometry.boundingBox!;
             const offsetX = -(bbox.min.x + bbox.max.x) / 2;
