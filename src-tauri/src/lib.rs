@@ -111,8 +111,8 @@ fn run_reconstruction(app: tauri::AppHandle, video_path: String, telemetry_path:
         let min_depth = depth_data.iter().cloned().fold(f32::INFINITY, f32::min);
         let max_depth = depth_data.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
 
-        // Metric flight offsets from GPS log
-        let (dx, dy_alt, dz_fwd) = if let Some(pt) = telemetry.get(frame_idx) {
+// Metric flight offsets and heading from GPS log
+        let (dx, dy_alt, dz_fwd, yaw_rad) = if let Some(pt) = telemetry.get(frame_idx) {
             let lat_rad = (pt.latitude * std::f64::consts::PI / 180.0) as f32;
             let delta_lat = (pt.latitude - origin_lat) as f32;
             let delta_lon = (pt.longitude - origin_lon) as f32;
@@ -120,9 +120,13 @@ fn run_reconstruction(app: tauri::AppHandle, video_path: String, telemetry_path:
             let x_m = delta_lon * (std::f64::consts::PI as f32 / 180.0) * 6378137.0 * lat_rad.cos();
             let z_m = delta_lat * (std::f64::consts::PI as f32 / 180.0) * 6378137.0;
             let y_m = pt.altitude_m - origin_alt;
-            (x_m, y_m, z_m)
+            
+            // Convert Yaw to radians for matrix rotation
+            let yaw_r = (pt.yaw_deg * std::f32::consts::PI / 180.0) as f32;
+            
+            (x_m, y_m, z_m, yaw_r)
         } else {
-            (0.0, 0.0, frame_idx as f32 * 12.0)
+            (0.0, 0.0, frame_idx as f32 * 12.0, 0.0)
         };
 
         for y in 0..INPUT_SIZE {
@@ -137,21 +141,24 @@ fn run_reconstruction(app: tauri::AppHandle, video_path: String, telemetry_path:
 
                 let z_depth = 20.0 + (1.0 - normalized_inv) * 15.0; 
 
-                // 1. Calculate standard physical dimensions
-                // 1. Calculate continuous ground-plane dimensions
-        let lateral = ((x as f32 - cx) * z_depth / 200.0) + dx;
-        
-        // Map the drone's forward flight to the image's vertical projection (Ground Z)
-        let ground_z = ((y as f32 - cy) * z_depth / 200.0) - (dz_fwd * 0.95); 
-        
-        // Optical depth becomes height. Closer objects (trees) stand taller than ground
-        let height = -z_depth - dy_alt; 
+         
+// 1. Intrinsic Projection (Pixels to Local Camera Space in meters)
+                // Using actual FOCAL_LENGTH fixes the ghosting/duplication scales
+                let local_x = (x as f32 - cx) * z_depth / FOCAL_LENGTH;
+                let local_z = (y as f32 - cy) * z_depth / FOCAL_LENGTH;
 
-        // 2. Map directly to Three.js default axes (Y-up, right-handed)
-        let ply_x = lateral; 
-        let ply_y = height;  
-        let ply_z = ground_z;
+                // 2. Extrinsic Rotation (Aligning with Drone Heading)
+                // Rotates the point cloud so it maps correctly whether flying North, South, East, or West
+                let rot_x = local_x * yaw_rad.cos() - local_z * yaw_rad.sin();
+                let rot_z = local_x * yaw_rad.sin() + local_z * yaw_rad.cos();
 
+                // 3. Map to Three.js axes applying real-world GPS translations
+                let ply_x = rot_x + dx; 
+                let ply_z = rot_z - dz_fwd; 
+                
+                // Keep height mapped to optical depth and altitude changes
+                let height = -z_depth - dy_alt; 
+                let ply_y = height;
                 let pixel = resized_img.get_pixel(x as u32, y as u32);
                 point_count += 1;
                 
@@ -178,6 +185,11 @@ fn run_reconstruction(app: tauri::AppHandle, video_path: String, telemetry_path:
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Activates deep backend logging for the ONNX Runtime engine
+    tracing_subscriber::fmt()
+        .with_env_filter("ort=debug")
+        .init();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![run_reconstruction])
