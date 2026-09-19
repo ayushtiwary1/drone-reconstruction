@@ -1,0 +1,9 @@
+{
+  "name": "drone-reconstruction",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build",
+    "tauri": "npm --prefix frontend run tauri"
+  }
+}

@@ -20,6 +20,10 @@
       /* Log Window */
       #log-box { flex-grow: 1; background: #030712; border: 1px solid #1f2937; padding: 10px; border-radius: 4px; font-size: 0.75rem; color: #4ade80; overflow-y: auto; white-space: pre-wrap; }
       
+      /* Export Buttons */
+      .export-btn { text-align: center; background: #1f2937; border: 1px solid #374151; color: #38bdf8; padding: 6px 0; font-size: 0.72rem; text-decoration: none; border-radius: 4px; font-weight: bold; display: block; transition: background 0.2s, border-color 0.2s, color 0.2s; }
+      .export-btn:hover { background: #0284c7; color: #fff; border-color: #38bdf8; }
+
       /* Right 3D Viewport */
       #viewport { flex-grow: 1; position: relative; width: calc(100vw - 340px); height: 100vh; }
       #canvas3d { width: 100%; height: 100%; display: block; }
@@ -27,8 +31,8 @@
   </head>
   <body>
     <div id="sidebar">
-      <h2>Recon 3D Engine</h2>
-      <p style="font-size: 0.7rem; color: #6b7280;">Air-Gapped Single-Pass Reconstruction</p>
+      <h2>3D Recon Engine</h2>
+      <p style="font-size: 0.7rem; color: #38bdf8;">Single-Pass UAV Aerial Mapping</p>
 
       <div>
         <label>1. Drone Video (.mp4 / 1080p+)</label>
@@ -43,13 +47,57 @@
       <div>
         <label>3. Hardware Profile</label>
         <select id="profileSelect">
-          <option value="edge">Edge (RTX 2050 4GB / Fast)</option>
-          <option value="balanced">Balanced (8GB VRAM / Detailed)</option>
-          <option value="ultra">Ultra (16GB+ VRAM / Photorealistic)</option>
+          <option value="edge_fast">Edge Fast (RTX 2050 4GB / Low VRAM)</option>
+          <option value="balanced" selected>Balanced (8GB VRAM / Detailed)</option>
+          <option value="high_accuracy">High Accuracy (16GB+ VRAM / Dense)</option>
         </select>
       </div>
 
+      <div>
+        <label>3b. Camera Angle</label>
+        <select id="cameraAngleSelect">
+          <option value="-90">Nadir (-90°)</option>
+          <option value="-60">-60°</option>
+          <option value="-45" selected>-45° (Standard Oblique)</option>
+          <option value="-30">-30°</option>
+          <option value="-20">-20°</option>
+        </select>
+      </div>
+
+      <div style="margin: 4px 0;">
+        <label style="display: flex; justify-content: space-between; font-size: 12px;">
+          <span>3c. View Mode:</span>
+        </label>
+        <select id="viewModeSelect">
+          <option value="mesh" selected>Textured Mesh (Full HD)</option>
+          <option value="points">Point Cloud</option>
+        </select>
+      </div>
+
+      <div>
+        <label>Reconstruction Progress</label>
+        <progress id="recon-progress" value="0" max="100" style="width:100%; height:8px; accent-color:#0284c7;"></progress>
+      </div>
+
+      <div style="margin: 8px 0;">
+        <label style="display: flex; justify-content: space-between; font-size: 12px;">
+          <span>4. Point Clarity / Size:</span>
+          <span id="pointSizeVal" style="color: #38bdf8; font-weight: bold;">2.0px</span>
+        </label>
+        <input type="range" id="pointSizeSlider" min="1.0" max="4.0" step="0.5" value="2.0" style="width:100%; accent-color:#0284c7;" />
+      </div>
+
       <button id="runBtn">START RECONSTRUCTION</button>
+
+      <div id="exportSection" style="margin: 4px 0 6px 0;">
+        <label style="font-size: 0.72rem; color: #94a3b8; display: block; margin-bottom: 4px;">Export Formats</label>
+        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 4px;">
+          <a id="downloadPly" href="/recon_output.ply" download="recon_output.ply" class="export-btn">📥 PLY</a>
+          <a id="downloadObj" href="/recon_output.obj" download="recon_output.obj" class="export-btn">📥 OBJ</a>
+          <a id="downloadLas" href="/recon_output.las" download="recon_output.las" class="export-btn">📥 LAS</a>
+          <a id="downloadGlb" href="/recon_output.glb" download="recon_output.glb" class="export-btn">📥 GLB</a>
+        </div>
+      </div>
 
       <label>System Output & Telemetry Log</label>
       <div id="log-box">[SYSTEM INITIALIZED] Standing by for video payload...</div>

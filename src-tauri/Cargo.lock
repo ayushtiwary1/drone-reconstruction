@@ -90,6 +90,8 @@ dependencies = [
  "image",
  "log",
  "ort",
+ "rayon",
+ "scopeguard",
  "serde",
  "serde_json",
  "tauri",

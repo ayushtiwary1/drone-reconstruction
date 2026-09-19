@@ -1,0 +1,19 @@
+# Dependency folders
+node_modules/
+venv/
+.venv/
+env/
+__pycache__/
+
+# Large binary and media file extensions
+*.mp4
+*.mov
+*.avi
+*.ply
+*.csv
+*.zip
+*.tar.gz
+
+# Specific large folders if you have any (e.g., data/ or weights/)
+data/
+test media/

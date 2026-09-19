@@ -1,14 +1,12 @@
 [package]
 name = "app"
 version = "0.1.0"
-description = "A Tauri App"
+description = "Tactical Air-Gapped 3D Reconstruction Engine"
 authors = ["you"]
 license = ""
 repository = ""
 edition = "2021"
 rust-version = "1.77.2"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
 name = "app_lib"
@@ -19,12 +17,26 @@ tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 serde_json = "1.0"
-serde = { version = "1.0", features = ["derive"] }
-log = "0.4"
-tauri = { version = "2.11.3", features = [] }
-tauri-plugin-log = "2"
-ort = { version = "2.0.0-rc.13", features = ["cuda"] }
-image = "0.25"
+serde      = { version = "1.0", features = ["derive"] }
+log        = "0.4"
+tauri      = { version = "2.11.3", features = [] }
+tauri-plugin-log    = "2"
 tauri-plugin-dialog = "2.7.3"
+
+# ONNX Runtime — `cuda` feature enables CUDAExecutionProvider linkage
+ort = { version = "2.0.0-rc.13", features = ["cuda"] }
+
+# Image decoding and resizing
+image = "0.25"
+
+# CSV telemetry parsing
 csv = "1.4.0"
+
+# Parallel pixel unprojection (post-inference loop only — safe context)
+rayon = "1.10"
+
+# RAII scope guard for guaranteed temp-dir cleanup even on early `?` returns
+scopeguard = "1"
+
+# Structured logging
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
