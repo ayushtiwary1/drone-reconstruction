@@ -42,7 +42,7 @@ impl HardwareProfile {
         match self {
             HardwareProfile::EdgeFast => 0.10,
             HardwareProfile::Balanced => 0.05,
-            HardwareProfile::HighAccuracy => 0.025,
+            HardwareProfile::HighAccuracy => 0.015,
         }
     }
 
@@ -734,7 +734,7 @@ fn extract_frames(video_path: &str, output_dir: &str, app: &tauri::AppHandle) ->
             "-i",
             video_path,
             "-vf",
-            "fps=1",
+            "fps=1, scale=1920:1080",
             "-q:v",
             "2",
             &format!("{}/frame_%04d.jpg", output_dir),
@@ -758,7 +758,7 @@ fn extract_frames(video_path: &str, output_dir: &str, app: &tauri::AppHandle) ->
             "-i",
             video_path,
             "-vf",
-            "fps=1",
+            "fps=1, scale=1920:1080",
             "-q:v",
             "2",
             &format!("{}/frame_%04d.jpg", output_dir),
