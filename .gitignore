@@ -13,6 +13,10 @@ __pycache__/
 *.csv
 *.zip
 *.tar.gz
+*.glb
+*.las
+*.obj
+
 
 # Specific large folders if you have any (e.g., data/ or weights/)
 data/
