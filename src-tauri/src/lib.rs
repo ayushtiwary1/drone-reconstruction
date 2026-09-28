@@ -1448,6 +1448,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
     let mut debug_frames: Vec<serde_json::Value> = Vec::new();
     let mut debug_cells: std::collections::HashMap<SurfaceKey, (u16, f32, usize)> = std::collections::HashMap::new();
     let mut overlap_diffs: Vec<f32> = Vec::new();
+    let mut last_pitch: Option<f32> = None;
     let excluded_set: std::collections::HashSet<u32> =
         excluded_frames.unwrap_or_default().into_iter().collect();
 
@@ -1534,11 +1535,6 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
         let h_agl = fp_opt.as_ref().map(|p| p.altitude_m).unwrap_or(20.0).clamp(3.0, 400.0);
         let yaw_deg = fp_opt.as_ref().map(|p| p.yaw_deg).unwrap_or(0.0);
         // Gimbal pitch from telemetry by default; the dropdown is the override.
-        let eff_pitch_deg = fp_opt
-            .as_ref()
-            .and_then(|p| p.gimbal_pitch_deg)
-            .unwrap_or(camera_pitch_deg);
-
         // Visual odometry shift
         let mut gps_ok_frame = true;
         let (v_shift_x, v_shift_y) = if let Some(ref prev) = prev_rgb {
@@ -1602,6 +1598,35 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
             ema_p95 = 0.3 * raw_p95 + 0.7 * ema_p95;
         }
         let d_range = (ema_p95 - ema_p5).max(1e-4);
+        let measured_pitch = fp_opt.as_ref().and_then(|p| p.gimbal_pitch_deg);
+        let horizon_pitch = if measured_pitch.is_none() && camera_pitch_deg == -45.0 {
+            let mut horizon_rows = Vec::new();
+            let threshold = (raw_p95 * 0.01).max(0.02);
+            for x in ((inp_w / 4)..(inp_w * 3 / 4)).step_by(8) {
+                if let Some(y) = (1..(inp_h / 2)).find(|&y| depth_raw[y * inp_w + x] > threshold) {
+                    if y > 4 && (y as f32) < cy - 10.0 { horizon_rows.push(y); }
+                }
+            }
+            if horizon_rows.len() >= 8 {
+                horizon_rows.sort_unstable();
+                let p = ((horizon_rows[horizon_rows.len() / 2] as f32 - cy) / fy).atan().to_degrees();
+                if (-35.0..=-5.0).contains(&p) { Some(p) } else { None }
+            } else { None }
+        } else { None };
+        let eff_pitch_deg = if let Some(p) = measured_pitch {
+            p
+        } else if let Some(p) = horizon_pitch {
+            last_pitch.map(|prev| prev + (p - prev).clamp(-1.0, 1.0)).unwrap_or(p)
+        } else {
+            last_pitch.unwrap_or(camera_pitch_deg)
+        };
+        last_pitch = Some(eff_pitch_deg);
+        if frame_idx == 0 && measured_pitch.is_none() {
+            let _ = app.emit("pipeline-log", match horizon_pitch {
+                Some(p) => format!("[CAMERA] Gimbal missing; estimated pitch {:.1}° from depth sky boundary (approximate).", p),
+                None => format!("[WARN] Gimbal and sky boundary unavailable; using legacy {:.1}° pitch (unverified).", camera_pitch_deg),
+            });
+        }
 
         // Camera pose basis vectors
         let yaw_rad = yaw_deg.to_radians();
@@ -1629,6 +1654,20 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
         ];
 
         let cam_c = [cur_world_x, h_agl, -cur_world_z];
+        let mut inverse_scales = Vec::new();
+        for y in ((active_y_start + (active_y_end - active_y_start) * 3 / 4)..active_y_end).step_by(4) {
+            let v = (y as f32 - cy) / fy;
+            for x in (inp_w / 5..inp_w * 4 / 5).step_by(4) {
+                let u = (x as f32 - cx) / fx;
+                let down_y = u * right[1] + v * down[1] + forward[1];
+                let d = depth_raw[y * inp_w + x];
+                if down_y < -0.15 && d > 0.1 && d.is_finite() {
+                    inverse_scales.push(d * h_agl * (1.0 + u * u + v * v).sqrt() / -down_y);
+                }
+            }
+        }
+        inverse_scales.sort_by(|a, b| a.total_cmp(b));
+        let inverse_scale = inverse_scales.get(inverse_scales.len() / 2).copied();
         if debug {
             let n = depth_raw.len() as f64;
             let mean = depth_raw.iter().map(|v| *v as f64).sum::<f64>() / n;
@@ -1640,11 +1679,15 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
                  p.altitude_m,
                  (-((p.latitude - origin.latitude) * r * std::f64::consts::PI / 180.0)) as f32]
             });
+            let row_profile: Vec<f32> = (0..inp_h).step_by((inp_h / 14).max(1))
+                .map(|y| depth_raw[y * inp_w..(y + 1) * inp_w].iter().copied().sum::<f32>() / inp_w as f32)
+                .collect();
             debug_frames.push(serde_json::json!({
-                "frame":frame_idx,"depth":{"min":depth_raw.iter().copied().fold(f32::INFINITY,f32::min),
+                "frame":frame_idx,"depth":{"row_profile":row_profile,"min":depth_raw.iter().copied().fold(f32::INFINITY,f32::min),
                     "max":depth_raw.iter().copied().fold(f32::NEG_INFINITY,f32::max),"std":std,
                     "p5":raw_p5,"p95":raw_p95},"pose":{"t":cam_c,"ypr":[yaw_deg,eff_pitch_deg,roll_rad]},
-                "gps_enu":gps,"telemetry_available":fp_opt.is_some()
+                "gps_enu":gps,"telemetry_available":fp_opt.is_some(),
+                "inverse_depth_scale":inverse_scale,"pitch_source":if measured_pitch.is_some(){"telemetry"}else if horizon_pitch.is_some(){"sky_boundary_estimate"}else{"legacy_fallback"}
             }));
         }
         // footprint: 4 image-corner rays cast to ground plane (y=0)
@@ -1697,7 +1740,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
                 let norm_inv = ((raw_d - ema_p5) / d_range).clamp(0.0, 1.0);
 
                 // Invalid depth filter
-                if norm_inv < 0.05 {
+                if norm_inv < 0.05 || raw_d < raw_p95 * 0.12 {
                     continue;
                 }
 
@@ -1728,7 +1771,9 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
                 }
 
                 let t_plane = h_agl / (-ray_y);
-                let t = t_plane * (1.0 + RELIEF_FRAC * (0.5 - norm_inv));
+                let t = inverse_scale.map(|scale| scale / raw_d.max(0.1))
+                    .unwrap_or(t_plane * (1.0 + RELIEF_FRAC * (0.5 - norm_inv)));
+                if !t.is_finite() || t > 180.0 || t > t_plane * 1.5 || t < t_plane * 0.4 { continue; }
 
                 let ply_x = cam_c[0] + t * ray_x;
                 let ply_y = cam_c[1] + t * ray_y;
@@ -1746,7 +1791,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
                     entry.0 += ply_y;
                     entry.1 += 1;
                 }
-                let w = (1.0 - (t / 150.0).clamp(0.0, 0.9)).max(0.1);
+                let w = (-ray_y).max(0.1) * (1.0 - (t / 150.0).clamp(0.0, 0.9));
 
                 match surface_grid.get_mut(&key) {
                     Some(cell) => {
@@ -2050,7 +2095,8 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
             "overlap":{"n":overlap_diffs.len(),"median_abs_height_m":if overlap_diffs.is_empty(){None}else{Some(pct(&overlap_diffs,0.5))}},
             "output_dir":out_dir,
         });
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../eval/debug.json");
+        let name = if std::env::var("RECON_DEBUG_AFTER").as_deref() == Ok("1") { "debug_after.json" } else { "debug.json" };
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../eval").join(name);
         fs::write(path, serde_json::to_vec_pretty(&dbg).unwrap()).map_err(|e| format!("[DEBUG] write: {e}"))?;
     }
 
