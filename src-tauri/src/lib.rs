@@ -806,6 +806,10 @@ pub struct SurfacePoint {
     pub frame_id: u16,
     /// largest single contribution weight seen so far
     pub best_w: f32,
+    /// number of distinct frames that contributed to this cell
+    pub view_count: u16,
+    /// last frame index that incremented view_count (dedup within a frame)
+    pub last_seen_frame: u16,
 }
 
 pub type SurfaceKey = (i32, i32);
@@ -1217,6 +1221,7 @@ async fn run_reconstruction(
     camera_pitch_deg: Option<f32>,
     sync_offset_sec: Option<f32>,
     frame_range: Option<(u32, u32)>,
+    excluded_frames: Option<Vec<u32>>,
 ) -> Result<String, String> {
     let pitch = camera_pitch_deg.unwrap_or(-45.0);
     let out_dir = resolve_output_dir(&app);
@@ -1230,6 +1235,7 @@ async fn run_reconstruction(
             out_dir,
             sync_offset_sec,
             frame_range,
+            excluded_frames,
         )
     })
     .await
@@ -1245,6 +1251,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
     out_dir: std::path::PathBuf,
     sync_offset_override: Option<f32>,
     frame_range: Option<(u32, u32)>,
+    excluded_frames: Option<Vec<u32>>,
 ) -> Result<String, String> {
     let wall_clock = Instant::now();
     let _ = app.emit("pipeline-log", "[SYSTEM] Initializing tactical 3D reconstruction pipeline...");
@@ -1317,6 +1324,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
     // Frames are at 1 fps → motion[i] ≈ pixel drift over video second i.
     // offset o maps frame i ↔ telemetry time (t0 + o + i).
     let mut sync_offset = 0.0f32;
+    let mut sync_confidence = 0.0f32;
     let mut tel_t0 = 0.0f32;
     if has_telemetry {
         tel_t0 = telemetry.first().map(|p| p.timestamp_sec).unwrap_or(0.0);
@@ -1348,6 +1356,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
                 }
             }
             let (off, conf) = estimate_sync_offset(&telemetry, &motion);
+            sync_confidence = conf;
             if conf >= 0.3 {
                 sync_offset = off;
                 let _ = app.emit(
@@ -1432,7 +1441,11 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
 
     // ── 5. Per-Frame Inference & Back-Projection Loop ────────
     // [demo] per-frame camera positions for recon_cameras.json (PLY frame)
-    let mut cam_positions: Vec<(u32, f32, [f32; 3])> = Vec::new();
+    let mut cam_positions: Vec<serde_json::Value> = Vec::new();
+    let mut frame_quality: Vec<(u32, f32, f32)> = Vec::new(); // (idx, sharpness, clip_frac)
+    let mut gnss_flags: Vec<bool> = Vec::new();
+    let excluded_set: std::collections::HashSet<u32> =
+        excluded_frames.unwrap_or_default().into_iter().collect();
 
     for (frame_idx, path) in frame_paths.iter().enumerate() {
         if let Some((a, b)) = frame_range {
@@ -1441,8 +1454,41 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
                 continue;
             }
         }
+        if excluded_set.contains(&(frame_idx as u32)) {
+            continue;
+        }
         let orig = image::open(path)
             .map_err(|e| format!("[IMAGE] Cannot open {:?}: {}", path, e))?;
+
+        // Per-frame quality metrics (cheap, 384-px grey thumbnail)
+        let (sharpness, clip_frac) = {
+            let g = orig.resize(384, 216, FilterType::Triangle).to_luma8();
+            let (gw, gh) = g.dimensions();
+            let px = g.as_raw();
+            let mut sum = 0f64;
+            let mut sum2 = 0f64;
+            let mut cnt = 0u64;
+            let mut clipped = 0u64;
+            for yy in 1..(gh as usize - 1) {
+                for xx in 1..(gw as usize - 1) {
+                    let i = yy * gw as usize + xx;
+                    let lap = -4.0 * px[i] as f64
+                        + px[i - 1] as f64
+                        + px[i + 1] as f64
+                        + px[i - gw as usize] as f64
+                        + px[i + gw as usize] as f64;
+                    sum += lap;
+                    sum2 += lap * lap;
+                    cnt += 1;
+                    if px[i] >= 250 || px[i] <= 5 {
+                        clipped += 1;
+                    }
+                }
+            }
+            let mean = sum / cnt as f64;
+            let var = (sum2 / cnt as f64) - mean * mean;
+            (var.max(0.0) as f32, clipped as f32 / cnt as f32)
+        };
 
         let rgb_img = if use_dynamic_756 {
             orig.resize_exact(inp_w as u32, inp_h as u32, FilterType::Triangle).to_rgb8()
@@ -1490,6 +1536,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
             .unwrap_or(camera_pitch_deg);
 
         // Visual odometry shift
+        let mut gps_ok_frame = true;
         let (v_shift_x, v_shift_y) = if let Some(ref prev) = prev_rgb {
             estimate_frame_shift(prev, &raw_rgb, inp_w, inp_h)
         } else {
@@ -1515,6 +1562,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
             let gps_step = (gps_z - cur_world_z).abs();
             let is_mismatched = gps_step < 0.1
                 || (gps_step > 0.0 && v_metric_forward > 0.5 && (gps_step / v_metric_forward < 0.3 || gps_step / v_metric_forward > 3.0));
+            gps_ok_frame = !is_mismatched;
 
             if is_mismatched {
                 let (sin_y, cos_y) = yaw_deg.to_radians().sin_cos();
@@ -1577,11 +1625,40 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
         ];
 
         let cam_c = [cur_world_x, h_agl, -cur_world_z];
-        cam_positions.push((
-            frame_idx as u32,
-            frame_idx as f32 + sync_offset + tel_t0,
-            cam_c,
-        ));
+        // footprint: 4 image-corner rays cast to ground plane (y=0)
+        let corners: [[f32; 2]; 4] = [
+            [(0.0 - cx) / fx, (active_y_start as f32 - cy) / fy],
+            [(inp_w as f32 - cx) / fx, (active_y_start as f32 - cy) / fy],
+            [(0.0 - cx) / fx, (active_y_end as f32 - cy) / fy],
+            [(inp_w as f32 - cx) / fx, (active_y_end as f32 - cy) / fy],
+        ];
+        let mut footprint = Vec::with_capacity(4);
+        for [u, v] in corners {
+            let rx = u * right[0] + v * down[0] + forward[0];
+            let ry = u * right[1] + v * down[1] + forward[1];
+            let rz = u * right[2] + v * down[2] + forward[2];
+            let rl = (rx * rx + ry * ry + rz * rz).sqrt().max(1e-6);
+            let dy = (ry / rl).min(-0.05); // horizon-clamped
+            let t = cam_c[1] / -dy;
+            footprint.push(serde_json::json!([
+                (cam_c[0] + t * rx / rl) as f64,
+                (cam_c[2] + t * rz / rl) as f64
+            ]));
+        }
+        cam_positions.push(serde_json::json!({
+            "frame": frame_idx,
+            "time_s": frame_idx as f32 + sync_offset + tel_t0,
+            "cam": cam_c,
+            "yaw_deg": yaw_deg,
+            "pitch_deg": eff_pitch_deg,
+            "h_agl": h_agl,
+            "footprint": footprint,
+            "sharpness": sharpness,
+            "exposure_clip": clip_frac,
+            "gps_ok": gps_ok_frame,
+        }));
+        frame_quality.push((frame_idx as u32, sharpness, clip_frac));
+        gnss_flags.push(gps_ok_frame);
 
         // Back-projection loop across every pixel
         for y in active_y_start..active_y_end {
@@ -1653,6 +1730,10 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
                         cell.g = (cell.g * cell.weight + pg * w) / total_w;
                         cell.b = (cell.b * cell.weight + pb * w) / total_w;
                         cell.weight = total_w;
+                        if cell.last_seen_frame != frame_idx as u16 {
+                            cell.last_seen_frame = frame_idx as u16;
+                            cell.view_count = cell.view_count.saturating_add(1);
+                        }
                         if w > cell.best_w {
                             cell.best_w = w;
                             cell.frame_id = frame_idx as u16;
@@ -1671,6 +1752,8 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
                                 weight: w,
                                 frame_id: frame_idx as u16,
                                 best_w: w,
+                                view_count: 1,
+                                last_seen_frame: frame_idx as u16,
                             },
                         );
                     }
@@ -1810,6 +1893,8 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
                             weight: 1.0,
                             frame_id: u16::MAX,
                             best_w: 0.0,
+                            view_count: 0,
+                            last_seen_frame: u16::MAX,
                         },
                     ));
                 }
@@ -1909,17 +1994,102 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
         emit_artifact("frames_bin", &frames_bin_path);
     }
 
-    // [demo] recon_cameras.json — per-frame camera centres (PLY coords)
+    // [demo] recon_views.bin — u16 LE view_count per PLY vertex
+    let views_bin_path = out_dir.join("recon_views.bin");
+    {
+        let mut vb = Vec::with_capacity(mesh_vertices.len() * 2);
+        for pt in &mesh_vertices {
+            vb.extend_from_slice(&pt.view_count.to_le_bytes());
+        }
+        let _ = fs::write(&views_bin_path, vb);
+        emit_artifact("views_bin", &views_bin_path);
+    }
+
+    // [demo] recon_cameras.json — per-frame camera metadata (PLY coords)
     let cams_path = out_dir.join("recon_cameras.json");
     {
-        let arr: Vec<serde_json::Value> = cam_positions
-            .iter()
-            .map(|(f, t, c)| {
-                serde_json::json!({"frame": f, "time_s": t, "cam": c})
-            })
-            .collect();
-        let _ = fs::write(&cams_path, serde_json::to_string(&arr).unwrap());
+        let _ = fs::write(&cams_path, serde_json::to_string(&cam_positions).unwrap());
         emit_artifact("cameras", &cams_path);
+    }
+
+    // [T10] capture_report.json — GO / NO-GO capture quality report
+    let report_path = out_dir.join("capture_report.json");
+    {
+        let n = frame_quality.len().max(1) as f32;
+        let mut sharps: Vec<f32> = frame_quality.iter().map(|q| q.1).collect();
+        sharps.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let med_sharp = if sharps.is_empty() { 0.0 } else { sharps[sharps.len() / 2] };
+        let blur_thresh = (med_sharp * 0.25).max(1.0);
+        let n_blur = frame_quality.iter().filter(|q| q.1 < blur_thresh).count() as f32;
+        let n_clip = frame_quality.iter().filter(|q| q.2 > 0.02).count() as f32;
+        let n_gps_bad = gnss_flags.iter().filter(|f| !**f).count() as f32;
+        let gps_gaps = if has_telemetry {
+            // count missing / interpolated altitude & timestamp gaps
+            let missing_alt = telemetry
+                .iter()
+                .filter(|p| !p.altitude_m.is_finite())
+                .count();
+            let mut big_gaps = 0usize;
+            for w in 1..telemetry.len() {
+                if telemetry[w].timestamp_sec - telemetry[w - 1].timestamp_sec > 2.0 {
+                    big_gaps += 1;
+                }
+            }
+            missing_alt + big_gaps
+        } else {
+            0
+        };
+        // flight type from GPS speed stats
+        let mut speeds: Vec<f32> = Vec::new();
+        for w in 1..telemetry.len() {
+            let a = &telemetry[w - 1];
+            let b = &telemetry[w];
+            let dt = (b.timestamp_sec - a.timestamp_sec).max(1e-3);
+            let dlat = (b.latitude - a.latitude) as f32 * 111_320.0;
+            let dlon = (b.longitude - a.longitude) as f32 * 111_320.0
+                * (a.latitude.to_radians().cos() as f32);
+            speeds.push((dlat * dlat + dlon * dlon).sqrt() / dt);
+        }
+        speeds.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let med_speed = if speeds.is_empty() { 0.0 } else { speeds[speeds.len() / 2] };
+        let max_speed = speeds.last().copied().unwrap_or(0.0);
+        let flight_type = if med_speed < 0.5 {
+            "hover"
+        } else if med_speed > 3.0 {
+            "forward"
+        } else {
+            "mixed"
+        };
+        let blur_pct = n_blur / n * 100.0;
+        let clip_pct = n_clip / n * 100.0;
+        let sync_conf = sync_confidence;
+        let verdict = if blur_pct > 50.0 || !has_telemetry {
+            "RE-FLY"
+        } else if blur_pct > 20.0 || clip_pct > 15.0 || gps_gaps > 0 || sync_conf < 0.3 {
+            "PARTIAL"
+        } else {
+            "GO"
+        };
+        let report = serde_json::json!({
+            "frames": frame_quality.len(),
+            "blur_pct": blur_pct,
+            "overexposed_pct": clip_pct,
+            "gps_gaps": gps_gaps,
+            "gps_disagree_frames": n_gps_bad as usize,
+            "sync_offset_sec": sync_offset,
+            "sync_confidence": sync_conf,
+            "flight_type": flight_type,
+            "median_speed_mps": med_speed,
+            "max_speed_mps": max_speed,
+            "verdict": verdict,
+            "note": "blur threshold = 25% of median Laplacian variance (relative measure, labelled estimate)",
+        });
+        let _ = fs::write(&report_path, serde_json::to_string_pretty(&report).unwrap());
+        emit_artifact("capture_report", &report_path);
+        let _ = app.emit("pipeline-log", format!(
+            "[REPORT] capture verdict: {} (blur {:.0}%, clip {:.0}%, gps gaps {}, sync r={:.2})",
+            verdict, blur_pct, clip_pct, gps_gaps, sync_conf
+        ));
     }
 
     // [demo] downscaled frame thumbnails for the filmstrip (320px wide)
@@ -2653,6 +2823,7 @@ mod tests {
             out_dir,
             None,
             frame_range,
+            None,
         );
         eprintln!("[baseline] elapsed={:?} result={:?}", t0.elapsed(), res);
         assert!(res.is_ok(), "pipeline failed: {:?}", res.err());
@@ -2664,9 +2835,9 @@ mod tests {
         // independent byte-level parse can read back, and must not satisfy the
         // white-model condition (std<10 OR >50% saturated OR >90% r==g==b).
         let verts = vec![
-            SurfacePoint { x: 0.0, y: 0.0, z: 0.0, r: 34.0, g: 120.0, b: 60.0, weight: 1.0, frame_id: 0, best_w: 1.0 },
-            SurfacePoint { x: 1.0, y: 0.0, z: 0.0, r: 200.0, g: 30.0, b: 40.0, weight: 1.0, frame_id: 0, best_w: 1.0 },
-            SurfacePoint { x: 0.0, y: 0.0, z: 1.0, r: 90.0, g: 80.0, b: 210.0, weight: 1.0, frame_id: 0, best_w: 1.0 },
+            SurfacePoint { x: 0.0, y: 0.0, z: 0.0, r: 34.0, g: 120.0, b: 60.0, weight: 1.0, frame_id: 0, best_w: 1.0, view_count: 1, last_seen_frame: 0 },
+            SurfacePoint { x: 1.0, y: 0.0, z: 0.0, r: 200.0, g: 30.0, b: 40.0, weight: 1.0, frame_id: 0, best_w: 1.0, view_count: 1, last_seen_frame: 0 },
+            SurfacePoint { x: 0.0, y: 0.0, z: 1.0, r: 90.0, g: 80.0, b: 210.0, weight: 1.0, frame_id: 0, best_w: 1.0, view_count: 1, last_seen_frame: 0 },
         ];
         let faces = vec![[0u32, 1, 2]];
         let tmp = std::env::temp_dir().join("test_ply_color.ply");
@@ -2696,7 +2867,7 @@ mod tests {
     #[test]
     fn test_ply_white_stats_catches_white() {
         let white = vec![
-            SurfacePoint { x: 0.0, y: 0.0, z: 0.0, r: 255.0, g: 255.0, b: 255.0, weight: 1.0, frame_id: 0, best_w: 1.0 };
+            SurfacePoint { x: 0.0, y: 0.0, z: 0.0, r: 255.0, g: 255.0, b: 255.0, weight: 1.0, frame_id: 0, best_w: 1.0, view_count: 1, last_seen_frame: 0 };
             10
         ];
         let (std, sat, gray) = ply_white_stats(&white);
