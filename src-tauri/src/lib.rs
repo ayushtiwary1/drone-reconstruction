@@ -2635,6 +2635,15 @@ mod tests {
         let out_dir = std::env::var("BASELINE_OUT")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| std::env::temp_dir().join("recon-baseline"));
+        let frame_range = std::env::var("BASELINE_FRAME_RANGE")
+            .ok()
+            .and_then(|s| {
+                let mut it = s.split('-');
+                Some((
+                    it.next()?.parse::<u32>().ok()?,
+                    it.next()?.parse::<u32>().ok()?,
+                ))
+            });
         let res = run_reconstruction_inner(
             app.handle().clone(),
             video,
@@ -2643,7 +2652,7 @@ mod tests {
             -45.0,
             out_dir,
             None,
-            None,
+            frame_range,
         );
         eprintln!("[baseline] elapsed={:?} result={:?}", t0.elapsed(), res);
         assert!(res.is_ok(), "pipeline failed: {:?}", res.err());
