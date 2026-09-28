@@ -11,7 +11,7 @@
 import * as THREE from 'three';
 import { PLYLoader } from 'three/examples/jsm/loaders/PLYLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { listen, type Event } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
 
@@ -256,6 +256,25 @@ appendLog('[SYS] Ready. Select video and telemetry, then click START RECONSTRUCT
 
 let frameTotal = 0;
 let framesDone = 0;
+let lastPlyPath = '';
+
+const EXPORT_IDS: Record<string, string> = {
+    ply: 'downloadPly',
+    obj: 'downloadObj',
+    las: 'downloadLas',
+    glb: 'downloadGlb',
+};
+
+listen<{ kind: string; path: string }>('pipeline-artifact', (e) => {
+    const { kind, path } = e.payload;
+    if (kind === 'ply') lastPlyPath = path;
+    const id = EXPORT_IDS[kind];
+    const a = id ? (document.getElementById(id) as HTMLAnchorElement | null) : null;
+    if (a) {
+        a.href = convertFileSrc(path);
+        a.setAttribute('download', path.split(/[\\/]/).pop() ?? a.getAttribute('download') ?? '');
+    }
+}).catch(console.error);
 
 listen<string>('pipeline-log', (event: Event<string>) => {
     const msg: string = event.payload;
@@ -355,8 +374,13 @@ runBtn.addEventListener('click', async () => {
             cameraPitchDeg: cameraPitch,
         });
 
-        // Bust cache so Vite serves the freshly written PLY
-        await loadPointCloud(`/recon_output.ply?v=${Date.now()}`);
+        // Load the artifact written to the app-data run dir (never a bundled
+        // stale file — convertFileSrc reads the absolute path on disk).
+        if (lastPlyPath) {
+            await loadPointCloud(convertFileSrc(lastPlyPath));
+        } else {
+            appendLog('<span style="color:#ef4444;">[FATAL] No PLY artifact reported by backend.</span>');
+        }
     } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         appendLog(`<span style="color:#ef4444;">[FATAL] ${msg}</span>`);

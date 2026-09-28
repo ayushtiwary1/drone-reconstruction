@@ -839,14 +839,32 @@ fn build_ort_session<R: tauri::Runtime>(
 
 const MODEL_PATH: &str = "../models/depth_anything_v2_vits.onnx";
 const TEMP_FRAMES_DIR: &str = "../backend/temp_frames";
-const PLY_OUTPUT_PATH: &str = "../frontend/public/recon_output.ply";
-const OBJ_OUTPUT_PATH: &str = "../frontend/public/recon_output.obj";
-const LAS_OUTPUT_PATH: &str = "../frontend/public/recon_output.las";
-const GLB_OUTPUT_PATH: &str = "../frontend/public/recon_output.glb";
-const GEOREF_OUTPUT_PATH: &str = "../frontend/public/recon_georeference.json";
+
+/// Output file names inside the per-run output directory.
+pub const PLY_NAME: &str = "recon_output.ply";
+pub const OBJ_NAME: &str = "recon_output.obj";
+pub const LAS_NAME: &str = "recon_output.las";
+pub const GLB_NAME: &str = "recon_output.glb";
+pub const GEOREF_NAME: &str = "recon_georeference.json";
 
 const ONNX_INPUT_NAME: &str = "pixel_values";
 const ONNX_OUTPUT_NAME: &str = "predicted_depth";
+
+/// Resolve the per-run output directory: <app-data>/recon/runs/<timestamp>/.
+/// Falls back to std::env::temp_dir() when path resolution is unavailable
+/// (e.g. mock runtime in tests).
+fn resolve_output_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> std::path::PathBuf {
+    use tauri::Manager;
+    let base = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("recon-engine"));
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    base.join("recon").join("runs").join(format!("{}", ts))
+}
 
 #[tauri::command]
 async fn run_reconstruction(
@@ -857,8 +875,9 @@ async fn run_reconstruction(
     camera_pitch_deg: Option<f32>,
 ) -> Result<String, String> {
     let pitch = camera_pitch_deg.unwrap_or(-45.0);
+    let out_dir = resolve_output_dir(&app);
     tauri::async_runtime::spawn_blocking(move || {
-        run_reconstruction_inner(app, video_path, telemetry_path, hardware_profile, pitch)
+        run_reconstruction_inner(app, video_path, telemetry_path, hardware_profile, pitch, out_dir)
     })
     .await
     .map_err(|e| format!("[FATAL] Background thread execution failed: {}", e))?
@@ -870,6 +889,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
     telemetry_path: String,
     hardware_profile: HardwareProfile,
     camera_pitch_deg: f32,
+    out_dir: std::path::PathBuf,
 ) -> Result<String, String> {
     let wall_clock = Instant::now();
     let _ = app.emit("pipeline-log", "[SYSTEM] Initializing tactical 3D reconstruction pipeline...");
@@ -1424,45 +1444,27 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
     let t_export_start = Instant::now();
     let vertex_count = mesh_vertices.len();
 
+    fs::create_dir_all(&out_dir).map_err(|e| format!("[IO] Cannot create output dir {:?}: {}", out_dir, e))?;
+    let _ = app.emit("pipeline-log", format!("[IO] Output directory: {}", out_dir.display()));
+
+    let ply_path = out_dir.join(PLY_NAME);
+    let obj_path = out_dir.join(OBJ_NAME);
+    let las_path = out_dir.join(LAS_NAME);
+    let glb_path = out_dir.join(GLB_NAME);
+    let georef_path = out_dir.join(GEOREF_NAME);
+
+    let emit_artifact = |kind: &str, path: &std::path::Path| {
+        let _ = app.emit(
+            "pipeline-artifact",
+            serde_json::json!({"kind": kind, "path": path.to_string_lossy()}),
+        );
+    };
+
     // 7A. Binary PLY Export (with element face)
-    let ply_file = File::create(PLY_OUTPUT_PATH)
-        .map_err(|e| format!("[IO] Cannot create PLY: {}", e))?;
-    let mut ply_writer = BufWriter::with_capacity(8 * 1024 * 1024, ply_file);
-
-    write!(
-        ply_writer,
-        "ply\nformat binary_little_endian 1.0\n\
-         element vertex {}\n\
-         property float x\nproperty float y\nproperty float z\n\
-         property uchar red\nproperty uchar green\nproperty uchar blue\n\
-         element face {}\n\
-         property list uchar int vertex_indices\n\
-         end_header\n",
-        vertex_count,
-        faces.len()
-    )
-    .map_err(|e| format!("[IO] PLY header write failed: {}", e))?;
-
-    let mut ply_bin: Vec<u8> = Vec::with_capacity(vertex_count * 15 + faces.len() * 13);
-    for pt in &mesh_vertices {
-        ply_bin.extend_from_slice(&pt.x.to_le_bytes());
-        ply_bin.extend_from_slice(&pt.y.to_le_bytes());
-        ply_bin.extend_from_slice(&pt.z.to_le_bytes());
-        ply_bin.push(pt.r.round().clamp(0.0, 255.0) as u8);
-        ply_bin.push(pt.g.round().clamp(0.0, 255.0) as u8);
-        ply_bin.push(pt.b.round().clamp(0.0, 255.0) as u8);
-    }
-    for f in &faces {
-        ply_bin.push(3u8);
-        ply_bin.extend_from_slice(&(f[0] as i32).to_le_bytes());
-        ply_bin.extend_from_slice(&(f[1] as i32).to_le_bytes());
-        ply_bin.extend_from_slice(&(f[2] as i32).to_le_bytes());
-    }
-    ply_writer.write_all(&ply_bin).map_err(|e| format!("[IO] PLY binary write failed: {}", e))?;
-    ply_writer.flush().map_err(|e| format!("[IO] PLY flush failed: {}", e))?;
+    write_ply(&ply_path, &mesh_vertices, &faces)?;
 
     // 7B. Wavefront OBJ Export (with real f lines)
-    if let Ok(obj_file) = File::create(OBJ_OUTPUT_PATH) {
+    if let Ok(obj_file) = File::create(&obj_path) {
         let mut obj_writer = BufWriter::with_capacity(8 * 1024 * 1024, obj_file);
         let _ = writeln!(obj_writer, "# 3D Reconstruction Output — Tactical Recon Engine");
         let _ = writeln!(obj_writer, "# Vertices: {}\n# Faces: {}", vertex_count, faces.len());
@@ -1522,7 +1524,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
         max_z = max_z.max(lz);
     }
 
-    if let Ok(las_file) = File::create(LAS_OUTPUT_PATH) {
+    if let Ok(las_file) = File::create(&las_path) {
         let mut las_writer = BufWriter::with_capacity(8 * 1024 * 1024, las_file);
         let mut header = [0u8; 227];
         header[0..4].copy_from_slice(b"LASF");
@@ -1577,10 +1579,10 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
     }
 
     // 7E. glTF 2.0 Binary (GLB) Export
-    let _ = write_glb(GLB_OUTPUT_PATH, &mesh_vertices, &faces);
+    let _ = write_glb(&glb_path, &mesh_vertices, &faces);
 
     // 7D. WGS-84 Georeference Metadata Export (Observed points)
-    if let Ok(georef_file) = File::create(GEOREF_OUTPUT_PATH) {
+    if let Ok(georef_file) = File::create(&georef_path) {
         let mut georef_writer = BufWriter::new(georef_file);
         let orig_lat = telemetry.first().map(|p| p.latitude).unwrap_or(0.0);
         let orig_lon = telemetry.first().map(|p| p.longitude).unwrap_or(0.0);
@@ -1620,21 +1622,106 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
         let _ = georef_writer.flush();
     }
 
+    emit_artifact("ply", &ply_path);
+    emit_artifact("obj", &obj_path);
+    emit_artifact("las", &las_path);
+    emit_artifact("glb", &glb_path);
+    emit_artifact("georef", &georef_path);
+
     let t_export = t_export_start.elapsed();
     let elapsed = wall_clock.elapsed();
     let msg = format!(
-        "Reconstruction complete in {:.2?} — {} vertices, {} faces written (PLY, OBJ, LAS, GLB & GeoRef). Export time: {:.2?}",
-        elapsed, vertex_count, faces.len(), t_export
+        "Reconstruction complete in {:.2?} — {} vertices, {} faces written to {} (PLY, OBJ, LAS, GLB & GeoRef). Export time: {:.2?}",
+        elapsed, vertex_count, faces.len(), out_dir.display(), t_export
     );
     let _ = app.emit("pipeline-log", format!("[SUCCESS] ✓ {}", msg));
     Ok(msg)
 }
 
 // ─────────────────────────────────────────────────────────────
+// Binary PLY Exporter (xyz f32 + rgb u8 + face list)
+// ─────────────────────────────────────────────────────────────
+
+fn write_ply(
+    path: &std::path::Path,
+    mesh_vertices: &[SurfacePoint],
+    faces: &[[u32; 3]],
+) -> Result<(), String> {
+    let ply_file =
+        File::create(path).map_err(|e| format!("[IO] Cannot create PLY: {}", e))?;
+    let mut ply_writer = BufWriter::with_capacity(8 * 1024 * 1024, ply_file);
+
+    write!(
+        ply_writer,
+        "ply\nformat binary_little_endian 1.0\n\
+         element vertex {}\n\
+         property float x\nproperty float y\nproperty float z\n\
+         property uchar red\nproperty uchar green\nproperty uchar blue\n\
+         element face {}\n\
+         property list uchar int vertex_indices\n\
+         end_header\n",
+        mesh_vertices.len(),
+        faces.len()
+    )
+    .map_err(|e| format!("[IO] PLY header write failed: {}", e))?;
+
+    let mut ply_bin: Vec<u8> = Vec::with_capacity(mesh_vertices.len() * 15 + faces.len() * 13);
+    for pt in mesh_vertices {
+        ply_bin.extend_from_slice(&pt.x.to_le_bytes());
+        ply_bin.extend_from_slice(&pt.y.to_le_bytes());
+        ply_bin.extend_from_slice(&pt.z.to_le_bytes());
+        ply_bin.push(pt.r.round().clamp(0.0, 255.0) as u8);
+        ply_bin.push(pt.g.round().clamp(0.0, 255.0) as u8);
+        ply_bin.push(pt.b.round().clamp(0.0, 255.0) as u8);
+    }
+    for f in faces {
+        ply_bin.push(3u8);
+        ply_bin.extend_from_slice(&(f[0] as i32).to_le_bytes());
+        ply_bin.extend_from_slice(&(f[1] as i32).to_le_bytes());
+        ply_bin.extend_from_slice(&(f[2] as i32).to_le_bytes());
+    }
+    ply_writer.write_all(&ply_bin).map_err(|e| format!("[IO] PLY binary write failed: {}", e))?;
+    ply_writer.flush().map_err(|e| format!("[IO] PLY flush failed: {}", e))?;
+    Ok(())
+}
+
+/// White-model regression check shared by tests: returns (mean channel std,
+/// % vertices with r,g,b >= 250, % vertices with r == g == b).
+#[cfg(test)]
+fn ply_white_stats(vertices: &[SurfacePoint]) -> (f32, f32, f32) {
+    if vertices.is_empty() {
+        return (0.0, 100.0, 100.0);
+    }
+    let n = vertices.len() as f32;
+    let (mut mr, mut mg, mut mb) = (0.0f32, 0.0f32, 0.0f32);
+    let (mut sat, mut gray) = (0usize, 0usize);
+    for p in vertices {
+        mr += p.r;
+        mg += p.g;
+        mb += p.b;
+        if p.r >= 250.0 && p.g >= 250.0 && p.b >= 250.0 {
+            sat += 1;
+        }
+        if p.r == p.g && p.g == p.b {
+            gray += 1;
+        }
+    }
+    mr /= n;
+    mg /= n;
+    mb /= n;
+    let mut var = 0.0f32;
+    for p in vertices {
+        var += (p.r - mr).powi(2) + (p.g - mg).powi(2) + (p.b - mb).powi(2);
+    }
+    let std = (var / (n * 3.0)).sqrt();
+    (std, sat as f32 / n * 100.0, gray as f32 / n * 100.0)
+}
+
+// ─────────────────────────────────────────────────────────────
 // glTF 2.0 Binary (GLB) Hand-Written Exporter (No Crates)
 // ─────────────────────────────────────────────────────────────
 
-fn write_glb(path: &str, vertices: &[SurfacePoint], faces: &[[u32; 3]]) -> Result<(), String> {
+fn write_glb(path: &std::path::Path, vertices: &[SurfacePoint], faces: &[[u32; 3]]) -> Result<(), String> {
     if vertices.is_empty() {
         return Ok(());
     }
@@ -1685,7 +1772,7 @@ fn write_glb(path: &str, vertices: &[SurfacePoint], faces: &[[u32; 3]]) -> Resul
     let bin_len = bin_data.len();
 
     let json_str = format!(
-        r#"{{"asset":{{"version":"2.0","generator":"Tactical-3D-Recon"}},"scene":0,"scenes":[{{"nodes":[0]}}],"nodes":[{{"mesh":0}}],"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0,"COLOR_0":1}},"indices":2,"mode":4}}]}}],"accessors":[{{"bufferView":0,"byteOffset":0,"componentType":5126,"count":{},"type":"VEC3","min":[{:.4},{:.4},{:.4}],"max":[{:.4},{:.4},{:.4}]}},{{"bufferView":1,"byteOffset":0,"componentType":5126,"count":{},"type":"VEC3"}},{{"bufferView":2,"byteOffset":0,"componentType":5125,"count":{},"type":"SCALAR"}}],"bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":{},"target":34962}},{{"buffer":0,"byteOffset":{},"byteLength":{},"target":34962}},{{"buffer":0,"byteOffset":{},"byteLength":{},"target":34963}}],"buffers":[{{"byteLength":{}}}]}}"#,
+        r#"{{"asset":{{"version":"2.0","generator":"Tactical-3D-Recon"}},"extensionsUsed":["KHR_materials_unlit"],"scene":0,"scenes":[{{"nodes":[0]}}],"nodes":[{{"mesh":0}}],"materials":[{{"pbrMetallicRoughness":{{"baseColorFactor":[1.0,1.0,1.0,1.0],"metallicFactor":0.0,"roughnessFactor":1.0}},"extensions":{{"KHR_materials_unlit":{{}}}},"doubleSided":true}}],"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0,"COLOR_0":1}},"indices":2,"material":0,"mode":4}}]}}],"accessors":[{{"bufferView":0,"byteOffset":0,"componentType":5126,"count":{},"type":"VEC3","min":[{:.4},{:.4},{:.4}],"max":[{:.4},{:.4},{:.4}]}},{{"bufferView":1,"byteOffset":0,"componentType":5126,"count":{},"type":"VEC3"}},{{"bufferView":2,"byteOffset":0,"componentType":5125,"count":{},"type":"SCALAR"}}],"bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":{},"target":34962}},{{"buffer":0,"byteOffset":{},"byteLength":{},"target":34962}},{{"buffer":0,"byteOffset":{},"byteLength":{},"target":34963}}],"buffers":[{{"byteLength":{}}}]}}"#,
         num_verts,
         min_pos[0], min_pos[1], min_pos[2],
         max_pos[0], max_pos[1], max_pos[2],
@@ -1915,15 +2002,65 @@ mod tests {
             let _id = h.listen_any("pipeline-log", |e| eprintln!("LOG: {}", e.payload()));
         }
         let t0 = Instant::now();
+        let out_dir = std::env::var("BASELINE_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("recon-baseline"));
         let res = run_reconstruction_inner(
             app.handle().clone(),
             video,
             tele,
             HardwareProfile::Balanced,
             -45.0,
+            out_dir,
         );
         eprintln!("[baseline] elapsed={:?} result={:?}", t0.elapsed(), res);
         assert!(res.is_ok(), "pipeline failed: {:?}", res.err());
+    }
+
+    #[test]
+    fn test_ply_roundtrip_has_color() {
+        // M1 regression: a written PLY must contain per-vertex colour that an
+        // independent byte-level parse can read back, and must not satisfy the
+        // white-model condition (std<10 OR >50% saturated OR >90% r==g==b).
+        let verts = vec![
+            SurfacePoint { x: 0.0, y: 0.0, z: 0.0, r: 34.0, g: 120.0, b: 60.0, weight: 1.0 },
+            SurfacePoint { x: 1.0, y: 0.0, z: 0.0, r: 200.0, g: 30.0, b: 40.0, weight: 1.0 },
+            SurfacePoint { x: 0.0, y: 0.0, z: 1.0, r: 90.0, g: 80.0, b: 210.0, weight: 1.0 },
+        ];
+        let faces = vec![[0u32, 1, 2]];
+        let tmp = std::env::temp_dir().join("test_ply_color.ply");
+        write_ply(&tmp, &verts, &faces).unwrap();
+        let bytes = fs::read(&tmp).unwrap();
+        let _ = fs::remove_file(&tmp);
+        let s = String::from_utf8_lossy(&bytes);
+        let hdr_end = s.find("end_header\n").unwrap();
+        let header = &s[..hdr_end];
+        assert!(header.contains("property uchar red"));
+        assert!(header.contains("property uchar green"));
+        assert!(header.contains("property uchar blue"));
+        assert!(header.contains("binary_little_endian"));
+        // binary body: 3 verts * 15 B + 1 face * 13 B
+        let body = &bytes[hdr_end + "end_header\n".len()..];
+        assert_eq!(body.len(), 3 * 15 + 13);
+        // vertex 0 colour at bytes 12..15
+        assert_eq!(body[12], 34);
+        assert_eq!(body[13], 120);
+        assert_eq!(body[14], 60);
+
+        let (std, sat, gray) = ply_white_stats(&verts);
+        assert!(std >= 10.0 && sat <= 50.0 && gray <= 90.0,
+            "coloured buffer failed white-model check: std={std} sat={sat} gray={gray}");
+    }
+
+    #[test]
+    fn test_ply_white_stats_catches_white() {
+        let white = vec![
+            SurfacePoint { x: 0.0, y: 0.0, z: 0.0, r: 255.0, g: 255.0, b: 255.0, weight: 1.0 };
+            10
+        ];
+        let (std, sat, gray) = ply_white_stats(&white);
+        assert!(std < 10.0 || sat > 50.0 || gray > 90.0,
+            "all-white buffer must trigger the white-model condition");
     }
 
     #[test]
