@@ -328,6 +328,12 @@ function resetLayout(): void {
 /* ── Toolbar ──────────────────────────────────────────────── */
 
 const toolbar = el('div', 'toolbar');
+// selection/measure tool state (declared before toolbar for TDZ)
+let pendingIdx: number | null = null;
+let areaMode = false;
+let areaPts: THREE.Vector3[] = [];
+let areaLine: THREE.Line | null = null;
+let areaBtn: HTMLButtonElement | null = null;
 
 function toolBtn(iconName: string, label: string, shortcut: string, onClick: () => void): HTMLButtonElement {
   const b = el('button', 'btn-tool');
@@ -400,6 +406,12 @@ const g4 = el('div', 'tb-group');
 const lassoBtn = toolBtn('lasso', 'Lasso', 'L', () => setRegionTool('lasso'));
 const boxBtn = toolBtn('square', 'Box', 'B', () => setRegionTool('box'));
 const regenBtn = toolBtn('refresh', 'Regen', '', () => doRegen());
+areaBtn = toolBtn('land-plot', 'Area', 'A', () => {
+  areaMode = !areaMode;
+  areaBtn?.classList.toggle('active', areaMode);
+  if (areaMode) toast('info', 'Area', 'Click polygon vertices — Enter closes, Esc cancels');
+  else cancelArea();
+});
 const undoBtn = toolBtn('undo', 'Undo', '', () => {
   if (provenance.undo()) toast('info', 'Undo', 'Previous buffers restored');
 });
@@ -496,7 +508,10 @@ function showShortcuts(): void {
   add('Frame all', 'F');
   add('Front / Side / Top / Iso', '1 / 3 / 7 / 5');
   add('Measure tool', 'M');
-  add('Cancel measurement / exit tool', 'Esc');
+  add('Area/volume polygon', 'A + Enter');
+  add('Lasso / Box region', 'L / B');
+  add('Exclude frame', 'X or right-click');
+  add('Cancel / clear selection', 'Esc');
   section('Workspace');
   add('Toggle bottom dock', '`');
   add('This overlay', '?');
@@ -640,7 +655,10 @@ async function startRun(opts?: {
     if (await provenance.load()) {
       // confidence field for the colour mode + accuracy readouts
       const g = viewer.getGeometry();
-      if (g && provenance.confidence) g.userData.confidence = provenance.confidence;
+      if (g && provenance.confidence) {
+        g.userData.confidence = provenance.confidence;
+        viewer.scene.userData.confidence = provenance.confidence;
+      }
       framesPanel.refresh();
       provenance.applyTints();
       updateGpsIndicator();
@@ -727,6 +745,12 @@ viewer.onModelClick = (p, idx) => {
     }
     return;
   }
+  // Area mode: accumulate polygon clicks; Enter commits, Esc cancels.
+  if (areaMode) {
+    areaPts.push(p.clone());
+    drawAreaPoly();
+    return;
+  }
   // Provenance: plain click (not measuring, no region tool) selects the
   // vertex's source frame and flashes it in the filmstrip.
   if (!store.get('measureMode') && store.get('regionTool') === 'off') {
@@ -748,10 +772,12 @@ viewer.onModelClick = (p, idx) => {
   if (!store.get('measureMode')) return;
   const pending = store.get('measurePending');
   if (!pending) {
+    pendingIdx = idx >= 0 ? idx : null;
     store.set('measurePending', [p.x, p.y, p.z]);
     viewer.measure.setPendingPoint([p.x, p.y, p.z]);
   } else {
-    const m = { id: Date.now(), a: pending, b: [p.x, p.y, p.z] as [number, number, number] };
+    const m = { id: Date.now(), a: pending, b: [p.x, p.y, p.z] as [number, number, number],
+      ia: pendingIdx ?? undefined, ib: idx >= 0 ? idx : undefined };
     store.set('measurements', [...store.get('measurements'), m]);
     store.set('measurePending', null);
     viewer.measure.setPendingPoint(null);
@@ -889,6 +915,56 @@ function clearAnalysis(): void {
   provenance.applyTints();
 }
 
+/* ── polygon area measure (T8) ─────────────────────────────── */
+
+function drawAreaPoly(): void {
+  if (areaLine) {
+    viewer.scene.remove(areaLine);
+    areaLine.geometry.dispose();
+    (areaLine.material as THREE.Material).dispose();
+    areaLine = null;
+  }
+  if (areaPts.length < 2) return;
+  const pts = [...areaPts, areaPts[0]];
+  areaLine = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints(pts),
+    new THREE.LineBasicMaterial({ color: 0xe8a33d })
+  );
+  viewer.scene.add(areaLine);
+}
+
+function commitArea(): void {
+  if (areaPts.length < 3) {
+    cancelArea();
+    return;
+  }
+  const ring = areaPts.map((p) => ({ x: p.x, z: p.z }));
+  const r = analysis.polygonMeasure(ring);
+  cancelArea();
+  if (!r) {
+    toast('info', 'Area', 'No vertices inside the polygon.');
+    return;
+  }
+  const sig = (0.05 + 0.15 * (1 - r.conf)) * Math.sqrt(r.area);
+  setAnalysisText(
+    `<div class="footnote">Polygon area ≈ ${r.area.toFixed(0)} m² ±${sig.toFixed(0)} (est.) · ` +
+    `cut/fill ≈ ${r.volume.toFixed(0)} m³ (≈${(r.volume / 10).toFixed(0)} truckloads) · conf ${r.conf.toFixed(2)}</div>`);
+  toast('success', 'Area + volume',
+    `${r.area.toFixed(0)} m² ±${sig.toFixed(0)} (est.) · ${r.volume.toFixed(0)} m³`);
+}
+
+function cancelArea(): void {
+  areaMode = false;
+  areaPts = [];
+  if (areaLine) {
+    viewer.scene.remove(areaLine);
+    areaLine.geometry.dispose();
+    (areaLine.material as THREE.Material).dispose();
+    areaLine = null;
+  }
+  if (areaBtn) areaBtn.classList.remove('active');
+}
+
 /* ── Store → viewer bindings ──────────────────────────────── */
 
 store.on('viewMode', (v) => viewer.setViewMode(v));
@@ -950,6 +1026,16 @@ document.addEventListener('keydown', (e) => {
     case 'M':
       store.set('measureMode', !store.get('measureMode'));
       break;
+    case 'a':
+    case 'A':
+      areaMode = !areaMode;
+      areaBtn?.classList.toggle('active', areaMode);
+      if (areaMode) toast('info', 'Area', 'Click polygon vertices — Enter closes, Esc cancels');
+      else cancelArea();
+      break;
+    case 'Enter':
+      if (areaMode && areaPts.length >= 3) commitArea();
+      break;
     case '`':
       setDockCollapsed(!layout.dockCollapsed);
       break;
@@ -957,7 +1043,9 @@ document.addEventListener('keydown', (e) => {
       showShortcuts();
       break;
     case 'Escape':
-      if (store.get('regionTool') !== 'off') {
+      if (areaMode) {
+        cancelArea();
+      } else if (store.get('regionTool') !== 'off') {
         store.set('regionTool', 'off');
       } else if (provenance.regionMask || provenance.selected.size) {
         provenance.clearAll();

@@ -40,6 +40,9 @@ export interface Measurement {
   id: number;
   a: [number, number, number];
   b: [number, number, number];
+  /** vertex indices of the picked endpoints (for confidence lookup) */
+  ia?: number;
+  ib?: number;
 }
 
 export interface AppState {

@@ -93,9 +93,17 @@ export class MeasureTool {
     this.scene.add(group);
 
     const st = measureStats(m);
+    // ± estimated from the confidence field at the endpoints (if loaded)
+    let errTxt = '';
+    const conf = this.scene.userData.confidence as Float32Array | undefined;
+    if (conf && m.ia !== undefined && m.ib !== undefined) {
+      const c = (conf[m.ia] + conf[m.ib]) / 2;
+      const sigma = 0.05 + 0.2 * (1 - c);
+      errTxt = ` ±${sigma.toFixed(2)} (est.)`;
+    }
     const label = el('div', 'measure-label');
     label.innerHTML =
-      `<span class="ml-dist">${st.dist3d.toFixed(2)} m</span>` +
+      `<span class="ml-dist">${st.dist3d.toFixed(2)} m${errTxt}</span>` +
       `<br><span class="ml-sub">ΔY ${st.dy.toFixed(2)} · horiz ${st.horizontal.toFixed(2)}</span>`;
     this.layer.appendChild(label);
     this.rendered.set(m.id, { group, label });

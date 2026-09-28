@@ -1,47 +1,42 @@
-# DEMO_NOTES — Frame + Region Selection (branch `demo-selection`)
+# DEMO_NOTES — EKDRSHTI (branch `features-all`)
 
-## 60-second demo script
+## 90-second demo script
 
-1. Pick `data/kabr/DJI_0212_trimmed.mp4` + `DJI_0212.SRT` → **Start Reconstruction**.
-   (~40 s on this machine; watch the log stream, sync estimate, CUDA EP.)
-2. When the model lands, the **filmstrip** slides in at the bottom —
-   30 thumbnails, one per extracted frame (1 fps).
-3. **Click F20** → its contributed vertices light up cyan; other frames dim.
-   Shift-click F25 extends to a range. Camera positions appear as grey dots;
-   selected ones glow cyan.
-4. Press **L** → drag a freehand loop over part of the model (e.g. the
-   vehicle/track patch). Region turns **orange**; the filmstrip auto-sorts
-   contributions — badges like `F12 · 3,410 pts` show which frames built it.
-5. **Alt-click F12** (or select + X) → frame excluded (dimmed red, `EXC`).
-6. **Regen region** → the region's excluded-frame points are replaced
-   instantly by neighbours' average (toast: "N points replaced…").
-   **Undo** restores.
-7. Select a range, press **Rebuild frames** → real backend run on only
-   those frames → fresh model reloads; toast/log shows wall-time.
-8. **Esc** clears selection/region.
-
-## What's real here
-
-- `recon_frames.bin` maps every PLY vertex to the frame that contributed
-  the largest fusion weight; hole-filled cells = 65535.
-- `recon_cameras.json` carries each processed frame's camera centre in
-  PLY world coords — markers match the mesh exactly.
-- Instant regenerate modifies the actual vertex buffers (positions +
-  colours) — it is a local fill, not a re-mesh.
-- "Rebuild from selected frames" re-runs the *actual* Rust pipeline with
-  `frame_range`, skipping inference/fusion for excluded frames.
+1. **Load**: video `data/kabr/DJI_0212_trimmed.mp4` + telemetry
+   `DJI_0212.SRT` → **Start Reconstruction** (~40 s; pipeline stages in
+   the dock show extract → telemetry → inference → fusion → mesh → export).
+2. **Capture report**: Inspector → *Capture Report* — verdict **GO**,
+   0% blur, 0% overexposed, sync offset +16 s (r=0.63), flight type.
+   *Accuracy & Limits* — mode "Rapid 2.5D", hole-fill %, GPS integrity.
+3. **Frames tab** (dock): filmstrip with quality flags + the GPS
+   integrity strip on top. Click **F20** → its vertices tint cyan and its
+   camera marker brightens. Shift-click a range. Right-click = exclude.
+4. **Lasso (L)**: draw around the vehicle/track patch → region goes
+   orange; filmstrip auto-highlights contributing frames with badges
+   (`F12 · 3,410 pts`). Plain click on the model = provenance toast
+   ("Vertex → frame F12").
+5. **Exclude** that frame (right-click or X) → **Regen** → the region's
+   excluded points are refilled from neighbours instantly; toast shows
+   real counts. **Undo** restores.
+6. **Rebuild**: select a frame range → Rebuild → the actual pipeline
+   reruns on just those frames; model reloads in ~15 s.
+7. **Trust layer**: Colour mode → *Confidence* (red = unobserved),
+   *Hillshade*, toggle *Hide unobserved* to drop hole-filled faces.
+8. **Measure**: M for distance (± estimate), A for polygon area +
+   cut/fill volume in m³ + truckloads.
+9. **Analysis**: Flood slider (m² submerged), *Find landing zones*
+   (25 m² flat, <7° slope), *Viewshed* (dead ground in red).
+10. **Exports**: PLY/OBJ/LAS (UTM 37N, RGB) + GLB + GeoRef — all from
+    the actual run's app-data folder.
 
 ## Known rough edges
-
-- Frame↔point mapping survives on `frame_id = highest-weight frame` —
-  a cell's colour/geometry is still the *fused* average, so tinting is
-  attribution, not ownership.
-- Instant regen fill uses a fixed 2 m grid hash (good for this scene's
-  density); sparse regions may leave unreplaced points.
-- The lasso screen-projection walks all vertices — ~1.4 M pts ≈ a brief
-  pause, no Web Worker.
-- Camera markers are unscaled spheres (fixed 1.2 m radius).
-- The `frame_id` only travels to the frontend via recon_frames.bin —
-  PLY/OBJ/GLB files themselves do not embed it.
-- If the asset protocol can't `fetch()` in a packaged build (it works in
-  dev), thumbnails/artifacts fall back silently to a logged warning.
+- `frame_id` = highest-weight contributing frame — tint is attribution,
+  not ownership (cells remain fused averages).
+- Instant regen uses a fixed 2 m kNN grid — sparse regions may leave a
+  few unfilled points.
+- Viewshed/LZ/flood are estimates on the heightmap — no facade geometry.
+- Confidence is heuristic (views + distance + local smoothness); it is
+  not a calibrated error model — ± values are labelled "est.".
+- Lasso projects ~1.4 M vertices synchronously — a brief pause is normal.
+- Mock mode (`npm run dev` in a plain browser) exercises the UI shell;
+  provenance data only appears after a real Tauri run.
