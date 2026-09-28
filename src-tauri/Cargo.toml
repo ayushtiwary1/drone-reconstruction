@@ -40,3 +40,6 @@ scopeguard = "1"
 
 # Structured logging
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+tauri = { version = "2.11.3", features = ["test"] }

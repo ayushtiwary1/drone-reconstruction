@@ -722,7 +722,7 @@ fn estimate_frame_shift(prev_rgb: &[u8], curr_rgb: &[u8], width: usize, height: 
 // FFmpeg Frame Extraction (Hardware-Accelerated with Fallback)
 // ─────────────────────────────────────────────────────────────
 
-fn extract_frames(video_path: &str, output_dir: &str, app: &tauri::AppHandle) -> Result<(), String> {
+fn extract_frames<R: tauri::Runtime>(video_path: &str, output_dir: &str, app: &tauri::AppHandle<R>) -> Result<(), String> {
     fs::create_dir_all(output_dir).map_err(|e| format!("[FFMPEG] mkdir failed: {}", e))?;
 
     // Try -hwaccel cuda first
@@ -780,9 +780,9 @@ fn extract_frames(video_path: &str, output_dir: &str, app: &tauri::AppHandle) ->
 
 static SESSION_CACHE: OnceLock<Mutex<Session>> = OnceLock::new();
 
-fn build_ort_session(
+fn build_ort_session<R: tauri::Runtime>(
     threads: usize,
-    app: &tauri::AppHandle,
+    app: &tauri::AppHandle<R>,
     model_path: &str,
 ) -> Result<&'static Mutex<Session>, String> {
     if let Some(cached) = SESSION_CACHE.get() {
@@ -864,8 +864,8 @@ async fn run_reconstruction(
     .map_err(|e| format!("[FATAL] Background thread execution failed: {}", e))?
 }
 
-fn run_reconstruction_inner(
-    app: tauri::AppHandle,
+fn run_reconstruction_inner<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     video_path: String,
     telemetry_path: String,
     hardware_profile: HardwareProfile,
@@ -1895,6 +1895,35 @@ mod tests {
         let t_plane = h / (-ray_y);
         let expected = h / (45.0f32.to_radians().sin());
         assert!((t_plane - expected).abs() < 1e-4);
+    }
+
+    /// M0 baseline / M1 reproduction: run the real pipeline headlessly on a video
+    /// file through a mock Tauri app. Usage:
+    ///   BASELINE_VIDEO=../data/kabr/x.mp4 BASELINE_TELEMETRY=../data/kabr/x.SRT \
+    ///   cargo test --release -- --ignored baseline_pipeline_headless --nocapture
+    #[test]
+    #[ignore]
+    fn baseline_pipeline_headless() {
+        let video = std::env::var("BASELINE_VIDEO")
+            .unwrap_or_else(|_| "../data/kabr/DJI_0212_trimmed.mp4".to_string());
+        let tele = std::env::var("BASELINE_TELEMETRY")
+            .unwrap_or_else(|_| "../data/kabr/DJI_0212.SRT".to_string());
+        let app = tauri::test::mock_app();
+        {
+            use tauri::Listener;
+            let h = app.handle().clone();
+            let _id = h.listen_any("pipeline-log", |e| eprintln!("LOG: {}", e.payload()));
+        }
+        let t0 = Instant::now();
+        let res = run_reconstruction_inner(
+            app.handle().clone(),
+            video,
+            tele,
+            HardwareProfile::Balanced,
+            -45.0,
+        );
+        eprintln!("[baseline] elapsed={:?} result={:?}", t0.elapsed(), res);
+        assert!(res.is_ok(), "pipeline failed: {:?}", res.err());
     }
 
     #[test]
