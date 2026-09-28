@@ -1546,33 +1546,19 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
         let v_metric_forward = v_shift_y * (h_agl / fx);
         let v_metric_lateral = -v_shift_x * (h_agl / fx);
 
-        if frame_idx == 0 {
-            cur_world_x = 0.0;
-            cur_world_z = 0.0;
-        } else if let (Some(ref curr_fp), Some(ref orig_fp)) = (&fp_opt, &telemetry.first()) {
-            let lat_rad = (curr_fp.latitude * std::f64::consts::PI / 180.0) as f32;
+        if let (Some(curr_fp), Some(orig_fp)) = (&fp_opt, telemetry.first()) {
+            let lat_rad = curr_fp.latitude.to_radians() as f32;
             let delta_lat = (curr_fp.latitude - orig_fp.latitude) as f32;
             let delta_lon = (curr_fp.longitude - orig_fp.longitude) as f32;
-            let deg_to_rad = std::f64::consts::PI as f32 / 180.0;
             let earth_r = 6_378_137.0f32;
-
-            let gps_x = delta_lon * deg_to_rad * earth_r * lat_rad.cos();
-            let gps_z = delta_lat * deg_to_rad * earth_r;
-
-            let gps_step = (gps_z - cur_world_z).abs();
-            let is_mismatched = gps_step < 0.1
-                || (gps_step > 0.0 && v_metric_forward > 0.5 && (gps_step / v_metric_forward < 0.3 || gps_step / v_metric_forward > 3.0));
-            gps_ok_frame = !is_mismatched;
-
-            if is_mismatched {
-                let (sin_y, cos_y) = yaw_deg.to_radians().sin_cos();
-                cur_world_x += v_metric_lateral * cos_y - v_metric_forward * sin_y;
-                cur_world_z += v_metric_lateral * sin_y + v_metric_forward * cos_y;
-            } else {
-                cur_world_x = gps_x;
-                cur_world_z = gps_z;
-            }
-        } else {
+            let gps_x = delta_lon.to_radians() * earth_r * lat_rad.cos();
+            let gps_z = delta_lat.to_radians() * earth_r;
+            let gps_step = (gps_x - cur_world_x).hypot(gps_z - cur_world_z);
+            let visual_step = v_metric_forward.hypot(v_metric_lateral);
+            gps_ok_frame = frame_idx == 0 || (gps_step - visual_step).abs() <= 1.0f32.max(gps_step * 0.7);
+            cur_world_x = gps_x;
+            cur_world_z = gps_z;
+        } else if frame_idx > 0 {
             let (sin_y, cos_y) = yaw_deg.to_radians().sin_cos();
             cur_world_x += v_metric_lateral * cos_y - v_metric_forward * sin_y;
             cur_world_z += v_metric_lateral * sin_y + v_metric_forward * cos_y;
@@ -2027,6 +2013,50 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
                     faces.push([i10 as u32, i11 as u32, i01 as u32]);
                 }
             }
+        }
+    }
+
+    if !faces.is_empty() {
+        fn root(parent: &mut [u32], mut i: u32) -> u32 {
+            while parent[i as usize] != i {
+                parent[i as usize] = parent[parent[i as usize] as usize];
+                i = parent[i as usize];
+            }
+            i
+        }
+        let mut parent: Vec<u32> = (0..mesh_vertices.len() as u32).collect();
+        for f in &faces {
+            let a = root(&mut parent, f[0]);
+            for &v in &f[1..] {
+                let b = root(&mut parent, v);
+                if a != b { parent[b as usize] = a; }
+            }
+        }
+        let mut component_faces = vec![0u32; mesh_vertices.len()];
+        for f in &faces { component_faces[root(&mut parent, f[0]) as usize] += 1; }
+        let largest = component_faces.iter().enumerate().max_by_key(|(_, n)| **n).map(|(i, _)| i as u32).unwrap();
+        let old_faces = faces.len();
+        let old_vertices = mesh_vertices.len();
+        faces.retain(|f| root(&mut parent, f[0]) == largest);
+        let mut used = vec![false; old_vertices];
+        for f in &faces { for &v in f { used[v as usize] = true; } }
+        let mut remap = vec![0u32; old_vertices];
+        let mut retained = Vec::with_capacity(used.iter().filter(|&&v| v).count());
+        for (i, p) in mesh_vertices.into_iter().enumerate() {
+            if used[i] {
+                remap[i] = retained.len() as u32;
+                retained.push(p);
+            }
+        }
+        for f in &mut faces { for v in f { *v = remap[*v as usize]; } }
+        mesh_vertices = retained;
+        let discarded_vertices = old_vertices - mesh_vertices.len();
+        let discarded_faces = old_faces - faces.len();
+        if discarded_faces > 0 {
+            let _ = app.emit("pipeline-log", format!(
+                "[WARN] Discarded {} disconnected faces / {} vertices; only the largest measured surface is exported.",
+                discarded_faces, discarded_vertices
+            ));
         }
     }
 
