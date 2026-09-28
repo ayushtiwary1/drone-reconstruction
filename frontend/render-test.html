@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>body{margin:0;background:#0b0f19}canvas{display:block}</style></head>
+<body>
+<canvas id="c" width="1280" height="800"></canvas>
+<script type="module">
+import * as THREE from '/node_modules/three/build/three.module.js';
+import { PLYLoader } from '/node_modules/three/examples/jsm/loaders/PLYLoader.js';
+import { OrbitControls } from '/node_modules/three/examples/jsm/controls/OrbitControls.js';
+
+const params = new URLSearchParams(location.search);
+const url = params.get('file') || '/recon_output.ply';
+const mode = params.get('mode') || 'mesh'; // mesh | points
+
+const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('c'), antialias: true });
+renderer.setSize(1280, 800, false);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b0f19);
+const camera = new THREE.PerspectiveCamera(60, 1280 / 800, 0.1, 10000);
+
+new PLYLoader().load(url, (g) => {
+  g.computeBoundingBox();
+  const bb = g.boundingBox;
+  const center = new THREE.Vector3(); bb.getCenter(center);
+  g.translate(-center.x, -bb.min.y, -center.z);
+  g.computeBoundingBox();
+  const size = new THREE.Vector3(); g.boundingBox.getSize(size);
+  const maxDim = Math.max(size.x, size.z, 20);
+
+  // Same camera as app, then oblique option
+  const az = parseFloat(params.get('az') || '0');
+  camera.position.set(Math.sin(az) * maxDim, maxDim * 0.7, Math.cos(az) * maxDim * 1.0);
+  camera.lookAt(0, size.y * 0.2, 0);
+
+  let obj;
+  if (mode === 'mesh' && g.index) {
+    obj = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide }));
+  } else {
+    obj = new THREE.Points(g, new THREE.PointsMaterial({ size: 2, vertexColors: true, sizeAttenuation: false }));
+  }
+  scene.add(obj);
+  renderer.render(scene, camera);
+  document.title = 'RENDERED ' + g.getAttribute('position').count + ' verts';
+  window.__done = true;
+}, undefined, (e) => { document.title = 'LOAD_ERROR'; console.error(e); });
+</script>
+</body></html>

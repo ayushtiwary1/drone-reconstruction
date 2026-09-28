@@ -1,0 +1,5 @@
+1
+00:00:00,000 --> 00:00:00,033
+<font size="36">SrtCnt : 1, DiffTime : 33ms
+[latitude: 0.394028] [longitude: 36.883816]
+</font>
