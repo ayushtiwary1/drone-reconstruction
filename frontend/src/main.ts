@@ -366,12 +366,19 @@ runBtn.addEventListener('click', async () => {
     appendLog(`[INFO] Starting reconstruction — profile: <strong>${profile}</strong>`);
 
     try {
-        const cameraPitch = cameraAngleSelect ? parseFloat(cameraAngleSelect.value) : -45.0;
+        // "auto" → send null → backend uses telemetry gimbal pitch (fallback −45°)
+        const camVal = cameraAngleSelect ? cameraAngleSelect.value : 'auto';
+        const cameraPitch = camVal === 'auto' ? null : parseFloat(camVal);
+        const syncInput = document.getElementById('syncOffsetInput') as HTMLInputElement | null;
+        const syncOffsetSec = syncInput && syncInput.value.trim() !== ''
+            ? parseFloat(syncInput.value)
+            : null;
         await invoke<string>('run_reconstruction', {
             videoPath: selectedVideoPath,
             telemetryPath: selectedCsvPath,
             hardwareProfile: profile,         // ← wired to Rust HardwareProfile enum
             cameraPitchDeg: cameraPitch,
+            syncOffsetSec,
         });
 
         // Load the artifact written to the app-data run dir (never a bundled

@@ -56,9 +56,10 @@
       <div>
         <label>3b. Camera Angle</label>
         <select id="cameraAngleSelect">
+          <option value="auto" selected>Auto (telemetry gimbal pitch)</option>
           <option value="-90">Nadir (-90°)</option>
           <option value="-60">-60°</option>
-          <option value="-45" selected>-45° (Standard Oblique)</option>
+          <option value="-45">-45° (Standard Oblique)</option>
           <option value="-30">-30°</option>
           <option value="-20">-20°</option>
         </select>
@@ -66,7 +67,14 @@
 
       <div style="margin: 4px 0;">
         <label style="display: flex; justify-content: space-between; font-size: 12px;">
-          <span>3c. View Mode:</span>
+          <span>3c. Clock offset s (blank = auto-estimate):</span>
+        </label>
+        <input id="syncOffsetInput" type="text" inputmode="decimal" placeholder="auto" style="width:100%; box-sizing:border-box; margin-bottom:10px;" />
+      </div>
+
+      <div style="margin: 4px 0;">
+        <label style="display: flex; justify-content: space-between; font-size: 12px;">
+          <span>3d. View Mode:</span>
         </label>
         <select id="viewModeSelect">
           <option value="mesh" selected>Textured Mesh (Full HD)</option>

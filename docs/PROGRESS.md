@@ -5,8 +5,8 @@
 | Milestone | State | Notes |
 |---|---|---|
 | M0 env+data+baseline | ✅ DONE | GPU yes (RTX 5050/8GB); baseline 30.7s on 30s clip; all audit bugs verified |
-| M1 white model | 🔄 in progress | bug NOT reproduced — file+loader verified colored; hypothesis table in DEBUG_WHITE_MODEL.md |
-| M2 correctness fixes | ⬜ | |
+| M1 white model | ✅ DONE | not reproduced on KABR; 3 real defects fixed (stale-file serving, GLB material, OBJ MTL); regression gate in place |
+| M2 correctness fixes | ✅ DONE | SRT old+new formats, alt-error, yaw wrap, gimbal pitch auto, sync-offset estimator (verified +16s on trimmed clip), native-res ffmpeg, LAS UTM+VLR+offsets, georef bounds+CRS — 15 tests green |
 | M3 poses+georef | ⬜ | |
 | M4 dense+texture | ⬜ | |
 | M5 outputs+accuracy | ⬜ | |

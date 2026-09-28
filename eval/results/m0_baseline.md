@@ -24,6 +24,10 @@ to CPU with recorded timings.
 
 ## Data (verified vs HF API listing)
 
+Source: `imageomics/KABR-raw-videos` · `21_01_2023_session_5/` (Mpala, 2023-01-21,
+DJI Air 2S). NB: an earlier session used a wrong fork URL — all artefacts below
+are confirmed against this dataset.
+
 | File | Listed | Downloaded | Status |
 |---|---|---|---|
 | DJI_0212_trimmed.mp4 | 580.3 MB | 580,250,663 B | OK |

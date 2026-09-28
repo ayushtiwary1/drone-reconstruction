@@ -1,0 +1,12 @@
+1
+00:00:00,000 --> 00:00:00,033
+<font size="36">FrameCnt : 1, DiffTime : 33ms
+2024-06-01 10:00:00,000,000
+[iso : 100] [shutter : 1/500] [fnum : 170] [ev : 0] [focal_len : 240] [drone_latitude : 0.400000] [drone_longitude : 36.900000] [rel_alt : 30.5] [abs_alt : 1650.2] [gb_pitch : -60.0] [gb_yaw : 5.0] [gb_roll : 0.0]
+</font>
+2
+00:00:00,033 --> 00:00:00,066
+<font size="36">FrameCnt : 2, DiffTime : 33ms
+2024-06-01 10:00:00,033,000
+[iso : 100] [shutter : 1/500] [fnum : 170] [ev : 0] [focal_len : 240] [drone_latitude : 0.400010] [drone_longitude : 36.900010] [rel_alt : 30.6] [abs_alt : 1650.3] [gb_pitch : -61.0] [gb_yaw : 5.5] [gb_roll : 0.0]
+</font>

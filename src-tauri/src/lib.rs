@@ -108,18 +108,51 @@ impl CameraIntrinsics {
 #[derive(Debug, Clone, Default)]
 pub struct FlightPoint {
     pub timestamp_sec: f32,
+    /// Absolute UTC timestamp (epoch seconds) when the SRT carries a
+    /// `YYYY-MM-DD hh:mm:ss,fff` line. Used for clock-offset cross-checks.
+    pub timestamp_utc: Option<f64>,
     pub latitude: f64,
     pub longitude: f64,
+    /// f32::NAN marks "missing in source" — filled/validated by `parse_telemetry`.
     pub altitude_m: f32,
     pub pitch_deg: f32,
     pub roll_deg: f32,
     pub yaw_deg: f32,
     pub gimbal_pitch_deg: Option<f32>,
+    pub gimbal_yaw_deg: Option<f32>,
+    pub gimbal_roll_deg: Option<f32>,
+    /// Per-frame counter (SrtCnt/FrameCnt) when present — video frame index.
+    pub frame_cnt: Option<u32>,
     pub focal_len: Option<f32>,
+    pub iso: Option<f32>,
+    /// Shutter speed in seconds (e.g. 1/2000 -> 0.0005).
+    pub shutter_sec: Option<f32>,
+    pub ev: Option<f32>,
 }
 
 fn clean_header(h: &str) -> String {
     h.trim().to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect()
+}
+
+/// Parse a shutter field like "1/2000.0" or "2000" into seconds.
+fn parse_shutter(v: &str) -> Option<f32> {
+    let v = v.trim();
+    if let Some((num, den)) = v.split_once('/') {
+        match (num.trim().parse::<f32>(), den.trim().parse::<f32>()) {
+            (Ok(n), Ok(d)) if d.abs() > 1e-9 => return Some(n / d),
+            _ => return None,
+        }
+    }
+    v.parse::<f32>().ok()
+}
+
+/// Normalise an SRT bracket key: lowercase, strip spaces/underscores/dots.
+fn srt_key(k: &str) -> String {
+    k.trim()
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect()
 }
 
 pub fn parse_dji_srt(srt_path: &str) -> Result<Vec<FlightPoint>, String> {
@@ -129,10 +162,70 @@ pub fn parse_dji_srt(srt_path: &str) -> Result<Vec<FlightPoint>, String> {
 
     let mut points: Vec<FlightPoint> = Vec::new();
     let mut current_time: Option<f32> = None;
-    let mut lat: Option<f64> = None;
-    let mut lon: Option<f64> = None;
-    let mut alt: Option<f32> = None;
-    let mut focal: Option<f32> = None;
+    let mut utc_time: Option<f64> = None;
+    let mut kv: HashMap<String, String> = HashMap::new();
+
+    let datetime_re = regex_like_datetime();
+
+    let flush = |current_time: &mut Option<f32>,
+                     utc_time: &mut Option<f64>,
+                     kv: &mut HashMap<String, String>,
+                     points: &mut Vec<FlightPoint>| {
+        if current_time.is_none() {
+            kv.clear();
+            return;
+        }
+        let get = |names: &[&str]| -> Option<String> {
+            for n in names {
+                if let Some(v) = kv.get(*n) {
+                    return Some(v.clone());
+                }
+            }
+            None
+        };
+        let getf = |names: &[&str]| -> Option<f32> {
+            get(names).and_then(|v| v.parse::<f32>().ok())
+        };
+        let getd = |names: &[&str]| -> Option<f64> {
+            get(names).and_then(|v| v.parse::<f64>().ok())
+        };
+
+        let lat = getd(&["latitude", "dronelatitude", "lat"]);
+        let lon = getd(&["longitude", "dronelongitude", "lon", "lng"]);
+        // altitude: rel_alt (AGL) preferred; legacy 'altitude' is already
+        // relative-to-takeoff on this DJI format; abs_alt is AMSL fallback.
+        let alt = getf(&["relalt", "relativealtitude", "relativelatitudealt"])
+            .or_else(|| getf(&["altitude", "alt", "height"]))
+            .or_else(|| getf(&["absalt", "altitudeamsl"]));
+        let frame_cnt = kv
+            .get("srtcnt")
+            .or_else(|| kv.get("framecnt"))
+            .and_then(|v| v.parse::<u32>().ok());
+
+        if let (Some(la), Some(lo)) = (lat, lon) {
+            points.push(FlightPoint {
+                timestamp_sec: current_time.unwrap(),
+                timestamp_utc: *utc_time,
+                latitude: la,
+                longitude: lo,
+                altitude_m: alt.unwrap_or(f32::NAN),
+                pitch_deg: getf(&["pitch", "dronepitch"]).unwrap_or(0.0),
+                roll_deg: getf(&["roll", "droneroll"]).unwrap_or(0.0),
+                yaw_deg: getf(&["yaw", "droneyaw", "heading"]).unwrap_or(0.0),
+                gimbal_pitch_deg: getf(&["gbpitch", "gimbalpitch", "camerapitch"]),
+                gimbal_yaw_deg: getf(&["gbyaw", "gimbalyaw"]),
+                gimbal_roll_deg: getf(&["gbroll", "gimbalroll"]),
+                frame_cnt,
+                focal_len: getf(&["focallen"]),
+                iso: getf(&["iso"]),
+                shutter_sec: get(&["shutter"]).and_then(|v| parse_shutter(&v)),
+                ev: getf(&["ev"]),
+            });
+        }
+        *current_time = None;
+        *utc_time = None;
+        kv.clear();
+    };
 
     for line_res in reader.lines() {
         let line = match line_res {
@@ -141,92 +234,117 @@ pub fn parse_dji_srt(srt_path: &str) -> Result<Vec<FlightPoint>, String> {
         };
         let trimmed = line.trim();
 
-        // 1. Timestamp line: "00:00:00,033 --> 00:00:00,066"
+        // 1. SRT timestamp line: "00:00:00,033 --> 00:00:00,066"
         if trimmed.contains(" --> ") {
             if let Some(start_part) = trimmed.split(" --> ").next() {
                 let parts: Vec<&str> = start_part.trim().split(':').collect();
                 if parts.len() == 3 {
                     let h: f32 = parts[0].parse().unwrap_or(0.0);
                     let m: f32 = parts[1].parse().unwrap_or(0.0);
-                    let sec_parts: Vec<&str> = parts[2].split(',').collect();
+                    let sec_parts: Vec<&str> = parts[2].split(|c| c == ',' || c == '.').collect();
                     let s: f32 = sec_parts[0].parse().unwrap_or(0.0);
-                    let ms: f32 = if sec_parts.len() > 1 {
-                        sec_parts[1].parse().unwrap_or(0.0)
+                    // fractional part: "250" (ms) or "250123" (µs) — normalise by digit count
+                    let frac: f32 = if sec_parts.len() > 1 {
+                        let raw = sec_parts[1].trim();
+                        let v: f64 = raw.parse().unwrap_or(0.0);
+                        (v / 10f64.powi(raw.len() as i32)) as f32
                     } else {
                         0.0
                     };
-                    current_time = Some(h * 3600.0 + m * 60.0 + s + ms / 1000.0);
+                    current_time = Some(h * 3600.0 + m * 60.0 + s + frac);
                 }
             }
             continue;
         }
 
-        // 2. Metadata line with bracketed key:value pairs
+        // 2. UTC datetime line: "2023-01-21 15:08:55,429,228"
+        if let Some(caps) = datetime_re(trimmed) {
+            // civil-time-of-day seconds (only used for cross-checks)
+            utc_time = Some(caps.0 * 3600.0 + caps.1 * 60.0 + caps.2 + caps.3);
+            continue;
+        }
+
+        // 3. Non-bracketed "Key : value" text (e.g. "SrtCnt : 2645, DiffTime : 34ms")
+        if !trimmed.contains('[') && trimmed.contains(':') {
+            // split on ',' then on ':' — first word before ':' is the key
+            for seg in trimmed.split(',') {
+                if let Some(ci) = seg.find(':') {
+                    // key = last word before ':', after any '>' HTML tag boundary
+                    let key = seg[..ci]
+                        .rsplit('>')
+                        .next()
+                        .and_then(|s| s.split_whitespace().last())
+                        .map(srt_key)
+                        .unwrap_or_default();
+                    let val: String = seg[ci + 1..]
+                        .trim()
+                        .trim_end_matches(|c: char| c.is_alphabetic())
+                        .trim()
+                        .to_string();
+                    if !key.is_empty() && !val.is_empty() {
+                        kv.entry(key).or_insert(val);
+                    }
+                }
+            }
+        }
+
+        // 4. Bracketed key:value pairs (old + new DJI formats)
         if trimmed.contains('[') && trimmed.contains(']') {
             let mut remaining = trimmed;
             while let Some(start) = remaining.find('[') {
                 if let Some(end) = remaining[start..].find(']') {
                     let inner = &remaining[start + 1..start + end];
                     if let Some(colon_idx) = inner.find(':') {
-                        let key = inner[..colon_idx].trim().to_lowercase();
-                        let val = inner[colon_idx + 1..].trim();
-                        match key.as_str() {
-                            "latitude" => {
-                                if let Ok(v) = val.parse::<f64>() {
-                                    lat = Some(v);
-                                }
-                            }
-                            "longitude" => {
-                                if let Ok(v) = val.parse::<f64>() {
-                                    lon = Some(v);
-                                }
-                            }
-                            "altitude" => {
-                                if let Ok(v) = val.parse::<f32>() {
-                                    alt = Some(v);
-                                }
-                            }
-                            "focal_len" | "focallen" => {
-                                if let Ok(v) = val.parse::<f32>() {
-                                    focal = Some(v);
-                                }
-                            }
-                            _ => {}
-                        }
+                        let key = srt_key(&inner[..colon_idx]);
+                        let val = inner[colon_idx + 1..].trim().to_string();
+                        kv.insert(key, val);
                     }
                     remaining = &remaining[start + end + 1..];
                 } else {
                     break;
                 }
             }
+            continue;
         }
 
-        // 3. End of block: emit point if complete
-        if (trimmed.contains("</font>") || trimmed.is_empty())
-            && current_time.is_some()
-            && lat.is_some()
-            && lon.is_some()
-        {
-            points.push(FlightPoint {
-                timestamp_sec: current_time.unwrap(),
-                latitude: lat.unwrap(),
-                longitude: lon.unwrap(),
-                altitude_m: alt.unwrap_or(20.0),
-                pitch_deg: 0.0,
-                roll_deg: 0.0,
-                yaw_deg: 0.0,
-                gimbal_pitch_deg: None,
-                focal_len: focal,
-            });
-            current_time = None;
-            lat = None;
-            lon = None;
-            alt = None;
-            focal = None;
+        // 4. End of block
+        if trimmed.contains("</font>") || trimmed.is_empty() {
+            flush(&mut current_time, &mut utc_time, &mut kv, &mut points);
         }
     }
+    flush(&mut current_time, &mut utc_time, &mut kv, &mut points);
 
     Ok(points)
+}
+
+/// Minimal datetime matcher without pulling in chrono: captures
+/// `YYYY-MM-DD hh:mm:ss,fff[,\u00b5s]` and returns (h, m, s, frac).
+fn regex_like_datetime() -> impl Fn(&str) -> Option<(f64, f64, f64, f64)> {
+    |line: &str| {
+        let b = line.as_bytes();
+        if b.len() < 19 {
+            return None;
+        }
+        if !(b[4] == b'-' && b[7] == b'-' && b[10] == b' ' && b[13] == b':' && b[16] == b':') {
+            return None;
+        }
+        let num = |i: usize, n: usize| -> Option<f64> {
+            line.get(i..i + n)?.parse::<f64>().ok()
+        };
+        let h = num(11, 2)?;
+        let m = num(14, 2)?;
+        let s = num(17, 2)?;
+        let frac = if b.len() > 19 && (b[19] == b',' || b[19] == b'.') {
+            let rest = &line[20..];
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let digits2: String = digits.chars().filter(|c| c.is_ascii_digit()).collect();
+            let v: f64 = digits2.parse().unwrap_or(0.0);
+            v / 10f64.powi(digits2.len() as i32)
+        } else {
+            0.0
+        };
+        Some((h, m, s, frac))
+    }
 }
 
 fn parse_telemetry_csv(csv_path: &str) -> Result<Vec<FlightPoint>, String> {
@@ -269,14 +387,22 @@ fn parse_telemetry_csv(csv_path: &str) -> Result<Vec<FlightPoint>, String> {
             lon_col = Some(i);
         }
         if alt_agl_col.is_none()
-            && (h.contains("heightagl") || h.contains("relativealt") || h.contains("vpsaltitude"))
+            && (h.contains("heightagl")
+                || h.contains("relativealt")
+                || h.contains("relalt")
+                || h.contains("altituderelative")
+                || h.contains("vpsaltitude")
+                || h.contains("altitudeaboveground")
+                || h == "height")
         {
             alt_agl_col = Some(i);
         }
         if alt_col.is_none()
             && (h.contains("altitudem")
                 || h.contains("altitudemeters")
+                || h.contains("altitudeamsl")
                 || h.contains("altitude")
+                || h.contains("gpsalt")
                 || h == "alt"
                 || h.contains("elevation"))
         {
@@ -322,9 +448,9 @@ fn parse_telemetry_csv(csv_path: &str) -> Result<Vec<FlightPoint>, String> {
         let lat = get_f64(lat_col, 0.0);
         let lon = get_f64(lon_col, 0.0);
         let alt = if let Some(c) = alt_agl_col {
-            get_f32(Some(c), 50.0)
+            get_f32(Some(c), f32::NAN)
         } else {
-            get_f32(alt_col, 50.0)
+            get_f32(alt_col, f32::NAN)
         };
 
         let yaw = get_f32(yaw_col, 0.0);
@@ -357,25 +483,68 @@ fn parse_telemetry_csv(csv_path: &str) -> Result<Vec<FlightPoint>, String> {
             yaw_deg: yaw,
             gimbal_pitch_deg: gimbal_pitch,
             focal_len: None,
+            ..Default::default()
         });
     }
 
     Ok(points)
 }
 
-fn parse_telemetry(path: &str) -> Result<Vec<FlightPoint>, String> {
+/// Validate + repair a parsed telemetry track in place.
+/// Returns warning strings (empty when clean). Missing altitude is an ERROR
+/// when it is absent everywhere — never a silent default.
+fn validate_telemetry(points: &mut Vec<FlightPoint>) -> Result<Vec<String>, String> {
+    let mut warnings = Vec::new();
+    if points.is_empty() {
+        return Ok(warnings);
+    }
+    let n_missing = points.iter().filter(|p| !p.altitude_m.is_finite()).count();
+    if n_missing == points.len() {
+        return Err(
+            "[TELEMETRY] No altitude data found in the telemetry file (expected altitude/rel_alt/\
+             abs_alt). Altitude cannot be guessed — aborting rather than fabricating heights."
+                .to_string(),
+        );
+    }
+    if n_missing > 0 {
+        warnings.push(format!(
+            "[WARN] {} of {} telemetry records lack altitude — filled by interpolation.",
+            n_missing,
+            points.len()
+        ));
+        // nearest-valid fill: forward then backward pass
+        let mut last = f32::NAN;
+        for p in points.iter_mut() {
+            if p.altitude_m.is_finite() {
+                last = p.altitude_m;
+            } else {
+                p.altitude_m = last;
+            }
+        }
+        let mut next = f32::NAN;
+        for p in points.iter_mut().rev() {
+            if p.altitude_m.is_finite() {
+                next = p.altitude_m;
+            } else if !p.altitude_m.is_finite() {
+                p.altitude_m = next;
+            }
+        }
+    }
+    Ok(warnings)
+}
+
+fn parse_telemetry(path: &str) -> Result<(Vec<FlightPoint>, Vec<String>), String> {
     if path.trim().is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
-    if path.to_lowercase().ends_with(".srt") {
-        let mut pts = parse_dji_srt(path)?;
-        smooth_trajectory(&mut pts);
-        Ok(pts)
+    let mut pts = if path.to_lowercase().ends_with(".srt") {
+        parse_dji_srt(path)?
     } else {
-        let mut pts = parse_telemetry_csv(path)?;
-        smooth_trajectory(&mut pts);
-        Ok(pts)
-    }
+        parse_telemetry_csv(path)?
+    };
+    let warnings = validate_telemetry(&mut pts)?;
+    smooth_trajectory(&mut pts);
+    Ok((pts, warnings))
 }
 
 pub fn smooth_trajectory(points: &mut [FlightPoint]) {
@@ -466,30 +635,71 @@ pub fn smooth_trajectory(points: &mut [FlightPoint]) {
     }
 }
 
+/// Circular interpolation for yaw — handles the 359° -> 1° wrap.
+fn lerp_yaw(a: f32, b: f32, t: f32) -> f32 {
+    let mut d = (b - a) % 360.0;
+    if d > 180.0 {
+        d -= 360.0;
+    }
+    if d < -180.0 {
+        d += 360.0;
+    }
+    let v = a + t * d;
+    if v < 0.0 {
+        v + 360.0
+    } else if v >= 360.0 {
+        v - 360.0
+    } else {
+        v
+    }
+}
+
+fn lerp_opt_angle(a: Option<f32>, b: Option<f32>, t: f32) -> Option<f32> {
+    match (a, b) {
+        (Some(ga), Some(gb)) => Some(lerp_yaw(ga, gb, t)),
+        (Some(ga), None) => Some(ga),
+        (None, Some(gb)) => Some(gb),
+        (None, None) => None,
+    }
+}
+
+fn lerp_opt(a: Option<f32>, b: Option<f32>, t: f32) -> Option<f32> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x + t * (y - x)),
+        _ => a.or(b),
+    }
+}
+
 fn lerp_point(a: &FlightPoint, b: &FlightPoint, t: f32) -> FlightPoint {
     FlightPoint {
         timestamp_sec: a.timestamp_sec + t * (b.timestamp_sec - a.timestamp_sec),
+        timestamp_utc: match (a.timestamp_utc, b.timestamp_utc) {
+            (Some(ua), Some(ub)) => Some(ua + t as f64 * (ub - ua)),
+            _ => a.timestamp_utc.or(b.timestamp_utc),
+        },
         latitude: a.latitude + t as f64 * (b.latitude - a.latitude),
         longitude: a.longitude + t as f64 * (b.longitude - a.longitude),
         altitude_m: a.altitude_m + t * (b.altitude_m - a.altitude_m),
         pitch_deg: a.pitch_deg + t * (b.pitch_deg - a.pitch_deg),
         roll_deg: a.roll_deg + t * (b.roll_deg - a.roll_deg),
-        yaw_deg: a.yaw_deg + t * (b.yaw_deg - a.yaw_deg),
-        gimbal_pitch_deg: match (a.gimbal_pitch_deg, b.gimbal_pitch_deg) {
-            (Some(ga), Some(gb)) => Some(ga + t * (gb - ga)),
-            (Some(ga), None) => Some(ga),
-            (None, Some(gb)) => Some(gb),
-            (None, None) => None,
-        },
+        yaw_deg: lerp_yaw(a.yaw_deg, b.yaw_deg, t),
+        gimbal_pitch_deg: lerp_opt(a.gimbal_pitch_deg, b.gimbal_pitch_deg, t),
+        gimbal_yaw_deg: lerp_opt_angle(a.gimbal_yaw_deg, b.gimbal_yaw_deg, t),
+        gimbal_roll_deg: lerp_opt(a.gimbal_roll_deg, b.gimbal_roll_deg, t),
+        frame_cnt: a.frame_cnt,
         focal_len: a.focal_len.or(b.focal_len),
+        iso: lerp_opt(a.iso, b.iso, t),
+        shutter_sec: lerp_opt(a.shutter_sec, b.shutter_sec, t),
+        ev: lerp_opt(a.ev, b.ev, t),
     }
 }
 
-fn get_frame_telemetry(points: &[FlightPoint], frame_idx: usize) -> Option<FlightPoint> {
+/// Telemetry interpolated at absolute telemetry time `t` (seconds since the
+/// telemetry track start). `target = frame_idx / fps + clock_offset`.
+fn telemetry_at(points: &[FlightPoint], target_time: f32) -> Option<FlightPoint> {
     if points.is_empty() {
         return None;
     }
-    let target_time = frame_idx as f32;
     let pos = points.iter().position(|p| p.timestamp_sec >= target_time);
     match pos {
         None => Some(points.last().unwrap().clone()),
@@ -614,6 +824,134 @@ pub fn voxel_key(x: f32, y: f32, z: f32, cell_size: f32) -> (i32, i32, i32) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Video ↔ telemetry clock-offset estimation.
+// Cross-correlates visual motion magnitude (ZNCC shift, pixels/s at model res)
+// against GPS ground speed at 1 Hz. Returns (offset_sec, pearson_score).
+// Video time t maps to telemetry time (t + offset).
+// ─────────────────────────────────────────────────────────────
+
+fn pearson(x: &[f32], y: &[f32]) -> f32 {
+    let n = x.len().min(y.len());
+    if n < 5 {
+        return 0.0;
+    }
+    let mx: f32 = x[..n].iter().sum::<f32>() / n as f32;
+    let my: f32 = y[..n].iter().sum::<f32>() / n as f32;
+    let (mut sxy, mut sxx, mut syy) = (0.0f32, 0.0f32, 0.0f32);
+    for i in 0..n {
+        let dx = x[i] - mx;
+        let dy = y[i] - my;
+        sxy += dx * dy;
+        sxx += dx * dx;
+        syy += dy * dy;
+    }
+    if sxx < 1e-9 || syy < 1e-9 {
+        return 0.0;
+    }
+    sxy / (sxx * syy).sqrt()
+}
+
+/// GPS ground-speed resampled to 1 Hz over [t0, t1) of the telemetry track.
+/// Index s = speed over [t0+s, t0+s+1].
+fn gps_speed_series(points: &[FlightPoint]) -> Vec<f32> {
+    if points.len() < 2 {
+        return Vec::new();
+    }
+    let t0 = points.first().unwrap().timestamp_sec;
+    let t1 = points.last().unwrap().timestamp_sec;
+    let n = (t1 - t0).floor().max(0.0) as usize;
+    let mut out = Vec::with_capacity(n);
+    for s in 0..n {
+        let a = telemetry_at(points, t0 + s as f32);
+        let b = telemetry_at(points, t0 + s as f32 + 1.0);
+        match (a, b) {
+            (Some(a), Some(b)) => {
+                let lat_rad = (a.latitude * std::f64::consts::PI / 180.0) as f32;
+                let dx = ((b.longitude - a.longitude) as f32)
+                    * (std::f64::consts::PI as f32 / 180.0)
+                    * 6_378_137.0
+                    * lat_rad.cos();
+                let dy = ((b.latitude - a.latitude) as f32)
+                    * (std::f64::consts::PI as f32 / 180.0)
+                    * 6_378_137.0;
+                out.push((dx * dx + dy * dy).sqrt());
+            }
+            _ => out.push(0.0),
+        }
+    }
+    out
+}
+
+/// Search clock offset o (video_t + o = telemetry_t) that maximises Pearson
+/// correlation between per-frame visual-motion magnitude and GPS speed.
+/// `motion[i]` is pixels/s of frame i (1 fps sampling).
+pub fn estimate_sync_offset(points: &[FlightPoint], motion: &[f32]) -> (f32, f32) {
+    if points.len() < 2 || motion.len() < 5 {
+        return (0.0, 0.0);
+    }
+    let t0 = points.first().unwrap().timestamp_sec;
+    let t1 = points.last().unwrap().timestamp_sec;
+    let srt_dur = t1 - t0;
+    let vid_dur = motion.len() as f32;
+    if srt_dur < 4.0 || vid_dur < 4.0 {
+        return (0.0, 0.0);
+    }
+    let gps = gps_speed_series(points);
+    let n_gps = gps.len() as i64;
+    let n_mot = motion.len() as i64;
+
+    let mut best_o = 0.0f32;
+    let mut best_c = f32::NEG_INFINITY;
+    // o in [-(vid_dur-4), srt_dur-4]; integer steps then 0.1 refine.
+    let mut o = -(vid_dur - 4.0);
+    while o <= srt_dur - 4.0 {
+        let i0 = (-o).ceil().max(0.0) as i64;
+        let i1 = (n_mot - 1).min((srt_dur - 1.0 - o).floor() as i64);
+        if i1 - i0 >= 4 {
+            let mut gs = Vec::new();
+            let mut ms = Vec::new();
+            for i in i0..=i1 {
+                let si = (o + i as f32).round() as i64;
+                if si >= 0 && si < n_gps {
+                    gs.push(gps[si as usize]);
+                    ms.push(motion[i as usize]);
+                }
+            }
+            let c = pearson(&gs, &ms);
+            if c > best_c {
+                best_c = c;
+                best_o = o;
+            }
+        }
+        o += 1.0;
+    }
+    // 0.1 s refinement
+    let mut o = best_o - 0.9;
+    while o <= best_o + 0.9 {
+        let i0 = (-o).ceil().max(0.0) as i64;
+        let i1 = (n_mot - 1).min((srt_dur - 1.0 - o).floor() as i64);
+        if i1 - i0 >= 4 {
+            let mut gs = Vec::new();
+            let mut ms = Vec::new();
+            for i in i0..=i1 {
+                let si = (o + i as f32).round() as i64;
+                if si >= 0 && si < n_gps {
+                    gs.push(gps[si as usize]);
+                    ms.push(motion[i as usize]);
+                }
+            }
+            let c = pearson(&gs, &ms);
+            if c > best_c {
+                best_c = c;
+                best_o = o;
+            }
+        }
+        o += 0.1;
+    }
+    (best_o, best_c)
+}
+
+// ─────────────────────────────────────────────────────────────
 // Inter-Frame Visual Odometry (Zero-Mean NCC)
 // ─────────────────────────────────────────────────────────────
 
@@ -734,7 +1072,7 @@ fn extract_frames<R: tauri::Runtime>(video_path: &str, output_dir: &str, app: &t
             "-i",
             video_path,
             "-vf",
-            "fps=1, scale=1920:1080",
+            "fps=1",
             "-q:v",
             "2",
             &format!("{}/frame_%04d.jpg", output_dir),
@@ -758,7 +1096,7 @@ fn extract_frames<R: tauri::Runtime>(video_path: &str, output_dir: &str, app: &t
             "-i",
             video_path,
             "-vf",
-            "fps=1, scale=1920:1080",
+            "fps=1",
             "-q:v",
             "2",
             &format!("{}/frame_%04d.jpg", output_dir),
@@ -804,7 +1142,7 @@ fn build_ort_session<R: tauri::Runtime>(
         Ok(s) => {
             let _ = app.emit(
                 "pipeline-log",
-                "[GPU] ✓ CUDA Execution Provider engaged — device 0 (NVIDIA RTX 2050).",
+                "[GPU] ✓ CUDA Execution Provider engaged — device 0.",
             );
             s
         }
@@ -873,11 +1211,20 @@ async fn run_reconstruction(
     telemetry_path: String,
     hardware_profile: HardwareProfile,
     camera_pitch_deg: Option<f32>,
+    sync_offset_sec: Option<f32>,
 ) -> Result<String, String> {
     let pitch = camera_pitch_deg.unwrap_or(-45.0);
     let out_dir = resolve_output_dir(&app);
     tauri::async_runtime::spawn_blocking(move || {
-        run_reconstruction_inner(app, video_path, telemetry_path, hardware_profile, pitch, out_dir)
+        run_reconstruction_inner(
+            app,
+            video_path,
+            telemetry_path,
+            hardware_profile,
+            pitch,
+            out_dir,
+            sync_offset_sec,
+        )
     })
     .await
     .map_err(|e| format!("[FATAL] Background thread execution failed: {}", e))?
@@ -890,6 +1237,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
     hardware_profile: HardwareProfile,
     camera_pitch_deg: f32,
     out_dir: std::path::PathBuf,
+    sync_offset_override: Option<f32>,
 ) -> Result<String, String> {
     let wall_clock = Instant::now();
     let _ = app.emit("pipeline-log", "[SYSTEM] Initializing tactical 3D reconstruction pipeline...");
@@ -928,8 +1276,11 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
     );
 
     // ── 3. Telemetry Ingestion & Duration Validation ─────────
-    let telemetry = parse_telemetry(&telemetry_path)?;
+    let (telemetry, tele_warnings) = parse_telemetry(&telemetry_path)?;
     let has_telemetry = !telemetry.is_empty();
+    for w in &tele_warnings {
+        let _ = app.emit("pipeline-log", w.clone());
+    }
 
     if has_telemetry {
         let srt_dur = telemetry.last().map(|p| p.timestamp_sec).unwrap_or(0.0)
@@ -953,6 +1304,56 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
             "pipeline-log",
             "[ODOMETRY] No external telemetry provided. Pure visual odometry driving 3D trajectory.",
         );
+    }
+
+    // ── 3b. Video↔telemetry clock-offset estimation ─────────
+    // Frames are at 1 fps → motion[i] ≈ pixel drift over video second i.
+    // offset o maps frame i ↔ telemetry time (t0 + o + i).
+    let mut sync_offset = 0.0f32;
+    let mut tel_t0 = 0.0f32;
+    if has_telemetry {
+        tel_t0 = telemetry.first().map(|p| p.timestamp_sec).unwrap_or(0.0);
+        if let Some(manual) = sync_offset_override {
+            sync_offset = manual;
+            let _ = app.emit(
+                "pipeline-log",
+                format!("[SYNC] Manual clock-offset override: {:.2}s", manual),
+            );
+        } else {
+            // motion pre-pass: per-frame pixel drift at 1 fps
+            let mut motion: Vec<f32> = Vec::with_capacity(num_frames);
+            let mut prev_small: Option<Vec<u8>> = None;
+            for path in &frame_paths {
+                if let Ok(img) = image::open(path) {
+                    let small = img
+                        .resize_exact(480, 270, FilterType::Triangle)
+                        .to_rgb8()
+                        .into_raw();
+                    if let Some(prev) = &prev_small {
+                        let (dx, dy) = estimate_frame_shift(prev, &small, 480, 270);
+                        motion.push((dx * dx + dy * dy).sqrt());
+                    } else {
+                        motion.push(0.0);
+                    }
+                    prev_small = Some(small);
+                } else {
+                    motion.push(0.0);
+                }
+            }
+            let (off, conf) = estimate_sync_offset(&telemetry, &motion);
+            if conf >= 0.3 {
+                sync_offset = off;
+                let _ = app.emit(
+                    "pipeline-log",
+                    format!("[SYNC] Estimated video↔telemetry offset = {:.2}s (r={:.2}) — applied.", off, conf),
+                );
+            } else {
+                let _ = app.emit(
+                    "pipeline-log",
+                    format!("[WARN] [SYNC] Offset estimate {:.2}s has low confidence (r={:.2}) — keeping 0.0s. Telemetry may be wrong-window.", off, conf),
+                );
+            }
+        }
     }
 
     // ── 4. Determine Model Resolution & Letterbox ────────────
@@ -1062,10 +1463,15 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
             .map_err(|e| format!("[ONNX] Output extraction failed: {}", e))?;
         let depth_raw: &[f32] = depth_view.1;
 
-        // Telemetry lookup
-        let fp_opt = get_frame_telemetry(&telemetry, frame_idx);
+        // Telemetry lookup at the frame's true timestamp: t0 + offset + frame
+        let fp_opt = telemetry_at(&telemetry, frame_idx as f32 + sync_offset + tel_t0);
         let h_agl = fp_opt.as_ref().map(|p| p.altitude_m).unwrap_or(20.0).clamp(3.0, 400.0);
         let yaw_deg = fp_opt.as_ref().map(|p| p.yaw_deg).unwrap_or(0.0);
+        // Gimbal pitch from telemetry by default; the dropdown is the override.
+        let eff_pitch_deg = fp_opt
+            .as_ref()
+            .and_then(|p| p.gimbal_pitch_deg)
+            .unwrap_or(camera_pitch_deg);
 
         // Visual odometry shift
         let (v_shift_x, v_shift_y) = if let Some(ref prev) = prev_rgb {
@@ -1131,7 +1537,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
 
         // Camera pose basis vectors
         let yaw_rad = yaw_deg.to_radians();
-        let pitch_rad = camera_pitch_deg.to_radians();
+        let pitch_rad = eff_pitch_deg.to_radians();
         let roll_rad = 0.0f32;
 
         let (s_p, c_p) = pitch_rad.sin_cos();
@@ -1501,120 +1907,89 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
         let _ = obj_writer.flush();
     }
 
-    // 7C. ASPRS LAS 1.2 Export (Observed points only, Y = north = -pt.z, correct bounds)
+    // 7C. ASPRS LAS 1.2 Export — real UTM coordinates + GeoTIFF CRS VLR.
+    // X = UTM easting, Y = UTM northing, Z = elevation (m above ENU origin).
     let observed_pts: Vec<&SurfacePoint> = surface_grid.values().collect();
-    let num_las_pts = observed_pts.len() as u32;
 
-    let mut min_x = f64::INFINITY;
-    let mut max_x = f64::NEG_INFINITY;
-    let mut min_y = f64::INFINITY;
-    let mut max_y = f64::NEG_INFINITY;
-    let mut min_z = f64::INFINITY;
-    let mut max_z = f64::NEG_INFINITY;
+    let orig_lat = telemetry.first().map(|p| p.latitude).unwrap_or(0.394);
+    let orig_lon = telemetry.first().map(|p| p.longitude).unwrap_or(36.88);
 
-    for pt in &observed_pts {
-        let lx = pt.x as f64;
-        let ly = (-pt.z) as f64; // LAS Y = North
-        let lz = pt.y as f64;   // LAS Z = Elevation
-        min_x = min_x.min(lx);
-        max_x = max_x.max(lx);
-        min_y = min_y.min(ly);
-        max_y = max_y.max(ly);
-        min_z = min_z.min(lz);
-        max_z = max_z.max(lz);
-    }
-
-    if let Ok(las_file) = File::create(&las_path) {
-        let mut las_writer = BufWriter::with_capacity(8 * 1024 * 1024, las_file);
-        let mut header = [0u8; 227];
-        header[0..4].copy_from_slice(b"LASF");
-        header[24] = 1;
-        header[25] = 2;
-        let sys_id = b"UAV-3D-RECON";
-        header[26..26 + sys_id.len()].copy_from_slice(sys_id);
-        let gen_sw = b"Tactical-Engine";
-        header[58..58 + gen_sw.len()].copy_from_slice(gen_sw);
-        header[94..96].copy_from_slice(&227u16.to_le_bytes());
-        header[96..100].copy_from_slice(&227u32.to_le_bytes());
-        header[104] = 2; // Point Data Record Format 2 (XYZ + RGB)
-        header[105..107].copy_from_slice(&26u16.to_le_bytes());
-        header[107..111].copy_from_slice(&num_las_pts.to_le_bytes());
-
-        let scale = 0.001f64;
-        header[131..139].copy_from_slice(&scale.to_le_bytes());
-        header[139..147].copy_from_slice(&scale.to_le_bytes());
-        header[147..155].copy_from_slice(&scale.to_le_bytes());
-
-        // Offsets 179..227: MaxX, MinX, MaxY, MinY, MaxZ, MinZ
-        header[179..187].copy_from_slice(&max_x.to_le_bytes());
-        header[187..195].copy_from_slice(&min_x.to_le_bytes());
-        header[195..203].copy_from_slice(&max_y.to_le_bytes());
-        header[203..211].copy_from_slice(&min_y.to_le_bytes());
-        header[211..219].copy_from_slice(&max_z.to_le_bytes());
-        header[219..227].copy_from_slice(&min_z.to_le_bytes());
-
-        let _ = las_writer.write_all(&header);
-
-        let mut point_buf = Vec::with_capacity(num_las_pts as usize * 26);
-        for pt in &observed_pts {
-            let xi = (((pt.x as f64) - min_x) / scale).round() as i32;
-            let yi = (((-pt.z as f64) - min_y) / scale).round() as i32;
-            let zi = (((pt.y as f64) - min_z) / scale).round() as i32;
-
-            point_buf.extend_from_slice(&xi.to_le_bytes());
-            point_buf.extend_from_slice(&yi.to_le_bytes());
-            point_buf.extend_from_slice(&zi.to_le_bytes());
-            point_buf.extend_from_slice(&1000u16.to_le_bytes());
-            point_buf.push(1); // Return number 1
-            point_buf.push(if pt.y > 4.0 { 5 } else { 2 }); // Classification: High Veg vs Ground
-            point_buf.push(0);
-            point_buf.push(0);
-            point_buf.extend_from_slice(&0u16.to_le_bytes());
-            point_buf.extend_from_slice(&((pt.r.round().clamp(0.0, 255.0) as u16) << 8).to_le_bytes());
-            point_buf.extend_from_slice(&((pt.g.round().clamp(0.0, 255.0) as u16) << 8).to_le_bytes());
-            point_buf.extend_from_slice(&((pt.b.round().clamp(0.0, 255.0) as u16) << 8).to_le_bytes());
+    if !observed_pts.is_empty() {
+        let las_pts: Vec<(f64, f64, f64, u8, u8, u8)> = observed_pts
+            .iter()
+            .map(|pt| {
+                (
+                    pt.x as f64,
+                    (-pt.z) as f64, // LAS Y = North = -Z in our frame
+                    pt.y as f64,    // LAS Z = elevation
+                    pt.r.round().clamp(0.0, 255.0) as u8,
+                    pt.g.round().clamp(0.0, 255.0) as u8,
+                    pt.b.round().clamp(0.0, 255.0) as u8,
+                )
+            })
+            .collect();
+        if let Err(e) = write_las(&las_path, &las_pts, orig_lat, orig_lon) {
+            let _ = app.emit("pipeline-log", format!("[WARN] LAS export failed: {}", e));
         }
-        let _ = las_writer.write_all(&point_buf);
-        let _ = las_writer.flush();
     }
 
     // 7E. glTF 2.0 Binary (GLB) Export
     let _ = write_glb(&glb_path, &mesh_vertices, &faces);
 
-    // 7D. WGS-84 Georeference Metadata Export (Observed points)
+    // 7D. Georeference Metadata Export (Observed points, ENU frame)
     if let Ok(georef_file) = File::create(&georef_path) {
         let mut georef_writer = BufWriter::new(georef_file);
-        let orig_lat = telemetry.first().map(|p| p.latitude).unwrap_or(0.0);
-        let orig_lon = telemetry.first().map(|p| p.longitude).unwrap_or(0.0);
         let orig_alt = telemetry.first().map(|p| p.altitude_m).unwrap_or(20.0);
         let earth_r = 6_378_137.0f64;
         let deg_per_m = 180.0 / (std::f64::consts::PI * earth_r);
         let lat_rad = (orig_lat * std::f64::consts::PI / 180.0) as f32;
         let deg_per_m_lon = deg_per_m / (lat_rad.cos() as f64).max(0.1);
 
-        // -Z is North, so lat = orig_lat - z * deg_per_m
-        let min_lat_wgs = orig_lat - (max_z) * deg_per_m;
-        let max_lat_wgs = orig_lat - (min_z) * deg_per_m;
-        let min_lon_wgs = orig_lon + (min_x) * deg_per_m_lon;
-        let max_lon_wgs = orig_lon + (max_x) * deg_per_m_lon;
+        // ENU bounds over observed points: x=east, north=-z, y=up
+        let (mut mn_e, mut mx_e) = (f64::INFINITY, f64::NEG_INFINITY);
+        let (mut mn_n, mut mx_n) = (f64::INFINITY, f64::NEG_INFINITY);
+        let (mut mn_u, mut mx_u) = (f64::INFINITY, f64::NEG_INFINITY);
+        for pt in &observed_pts {
+            mn_e = mn_e.min(pt.x as f64);
+            mx_e = mx_e.max(pt.x as f64);
+            mn_n = mn_n.min(-pt.z as f64);
+            mx_n = mx_n.max(-pt.z as f64);
+            mn_u = mn_u.min(pt.y as f64);
+            mx_u = mx_u.max(pt.y as f64);
+        }
+        if observed_pts.is_empty() {
+            (mn_e, mx_e, mn_n, mx_n, mn_u, mx_u) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        }
+
+        // lat bounds from NORTH extent (not elevation); lon from east.
+        let min_lat_wgs = orig_lat + mn_n * deg_per_m;
+        let max_lat_wgs = orig_lat + mx_n * deg_per_m;
+        let min_lon_wgs = orig_lon + mn_e * deg_per_m_lon;
+        let max_lon_wgs = orig_lon + mx_e * deg_per_m_lon;
+        let utm = utm_zone_epsg(orig_lat, orig_lon);
 
         let _ = writeln!(
             georef_writer,
             "{{\n  \"description\": \"Single-Pass Drone Video 3D Reconstruction Metadata\",\n  \
                \"spatial_accuracy\": \"GPS-limited (target <= 1 m, not independently validated with GCPs)\",\n  \
-               \"coordinate_system\": \"WGS-84 / Metric Cartesian Local Plane\",\n  \
+               \"coordinate_system\": {{\n    \"frame\": \"ENU at origin (x=east, y=north; z=up in PLY/OBJ/GLB; LAS stores UTM)\",\n    \
+               \"geographic\": \"WGS-84 (EPSG:4326)\",\n    \"projected\": \"UTM zone {}{} EPSG:{}\",\n    \
+               \"vertical_datum\": \"relative height above takeoff point (AGL); not geoid-referenced\"\n  }},\n  \
                \"assumptions\": {{\n    \"camera_pitch_deg\": {:.1},\n    \"hfov_deg\": {:.1},\n    \"altitude_reference\": \"relative to takeoff (AGL)\"\n  }},\n  \
                \"origin\": {{\n    \"latitude\": {:.6},\n    \"longitude\": {:.6},\n    \"altitude_m\": {:.2}\n  }},\n  \
                \"bounds_wgs84\": {{\n    \"min_latitude\": {:.6},\n    \"max_latitude\": {:.6},\n    \"min_longitude\": {:.6},\n    \"max_longitude\": {:.6}\n  }},\n  \
                \"metric_extents\": {{\n    \"width_x_m\": {:.2},\n    \"height_relief_y_m\": {:.2},\n    \"length_z_m\": {:.2}\n  }},\n  \
+               \"sync_offset_sec\": {:.2},\n  \
                \"total_observed_points\": {},\n  \
                \"total_mesh_vertices\": {},\n  \
                \"total_mesh_faces\": {},\n  \
                \"deliverables\": [\"recon_output.ply\", \"recon_output.obj\", \"recon_output.las\", \"recon_output.glb\", \"recon_georeference.json\"]\n}}",
+            utm.0, utm.2, utm.1,
             camera_pitch_deg, intrinsics.hfov_deg,
             orig_lat, orig_lon, orig_alt,
             min_lat_wgs, max_lat_wgs, min_lon_wgs, max_lon_wgs,
-            max_x - min_x, max_z - min_z, max_y - min_y,
+            mx_e - mn_e, mx_u - mn_u, mx_n - mn_n,
+            sync_offset,
             observed_pts.len(),
             vertex_count,
             faces.len()
@@ -1636,6 +2011,182 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
     );
     let _ = app.emit("pipeline-log", format!("[SUCCESS] ✓ {}", msg));
     Ok(msg)
+}
+
+// ─────────────────────────────────────────────────────────────
+// UTM forward projection (WGS-84 ellipsoid, standard series to A^6)
+// ─────────────────────────────────────────────────────────────
+
+/// Returns (zone, epsg, hemisphere_char) for a WGS-84 lat/lon.
+fn utm_zone_epsg(lat: f64, lon: f64) -> (u32, u32, &'static str) {
+    let zone = (((lon + 180.0) / 6.0).floor() as u32 + 1).clamp(1, 60);
+    if lat >= 0.0 {
+        (zone, 32600 + zone, "N")
+    } else {
+        (zone, 32700 + zone, "S")
+    }
+}
+
+/// WGS-84 (deg) -> UTM (m). Returns (easting, northing).
+fn wgs84_to_utm(lat_deg: f64, lon_deg: f64) -> (f64, f64) {
+    let a = 6_378_137.0f64;
+    let f = 1.0 / 298.257_223_563;
+    let k0 = 0.9996;
+    let e2 = f * (2.0 - f);
+    let ep2 = e2 / (1.0 - e2);
+    let (zone, _, _) = utm_zone_epsg(lat_deg, lon_deg);
+    let lon0 = ((zone as f64) - 1.0) * 6.0 - 180.0 + 3.0;
+    let lat = lat_deg.to_radians();
+    let lon = lon_deg.to_radians();
+    let lon0 = lon0.to_radians();
+    let n = a / (1.0 - e2 * lat.sin().powi(2)).sqrt();
+    let t = lat.tan().powi(2);
+    let c = ep2 * lat.cos().powi(2);
+    let aa = lat.cos() * (lon - lon0);
+    let m = a
+        * ((1.0 - e2 / 4.0 - 3.0 * e2.powi(2) / 64.0 - 5.0 * e2.powi(3) / 256.0) * lat
+            - (3.0 * e2 / 8.0 + 3.0 * e2.powi(2) / 32.0 + 45.0 * e2.powi(3) / 1024.0)
+                * (2.0 * lat).sin()
+            + (15.0 * e2.powi(2) / 256.0 + 45.0 * e2.powi(3) / 1024.0) * (4.0 * lat).sin()
+            - (35.0 * e2.powi(3) / 3072.0) * (6.0 * lat).sin());
+    let mut x = k0
+        * n
+        * (aa + (1.0 - t + c) * aa.powi(3) / 6.0
+            + (5.0 - 18.0 * t + t * t + 72.0 * c - 58.0 * ep2) * aa.powi(5) / 120.0)
+        + 500_000.0;
+    let mut y = k0
+        * (m + n
+            * lat.tan()
+            * (aa.powi(2) / 2.0
+                + (5.0 - t + 9.0 * c + 4.0 * c * c) * aa.powi(4) / 24.0
+                + (61.0 - 58.0 * t + t * t + 600.0 * c - 330.0 * ep2) * aa.powi(6) / 720.0));
+    if lat_deg < 0.0 {
+        y += 10_000_000.0;
+    }
+    if !x.is_finite() || !y.is_finite() {
+        (x, y) = (0.0, 0.0);
+    }
+    (x, y)
+}
+
+// ─────────────────────────────────────────────────────────────
+// ASPRS LAS 1.2 writer — UTM easting/northing + GeoTIFF CRS VLR.
+// pts: (east_rel_m, north_rel_m, up_m, r, g, b) in the ENU frame
+// centred on `origin_lat/lon`.
+// ─────────────────────────────────────────────────────────────
+
+fn write_las(
+    path: &std::path::Path,
+    pts: &[(f64, f64, f64, u8, u8, u8)],
+    origin_lat: f64,
+    origin_lon: f64,
+) -> Result<(), String> {
+    if pts.is_empty() {
+        return Err("empty point set".into());
+    }
+    let (_zone, epsg, _) = utm_zone_epsg(origin_lat, origin_lon);
+    let (e0, n0) = wgs84_to_utm(origin_lat, origin_lon);
+
+    // UTM coordinates
+    let mut min = [f64::INFINITY; 3];
+    let mut max = [f64::NEG_INFINITY; 3];
+    let coords: Vec<(f64, f64, f64)> = pts
+        .iter()
+        .map(|p| {
+            let c = (e0 + p.0, n0 + p.1, p.2);
+            for i in 0..3 {
+                min[i] = min[i].min([c.0, c.1, c.2][i]);
+                max[i] = max[i].max([c.0, c.1, c.2][i]);
+            }
+            c
+        })
+        .collect();
+
+    let scale = 0.001f64;
+    // offsets = min bounds → decoded coord = int*scale + offset, mm resolution
+    let file = File::create(path).map_err(|e| format!("[IO] LAS create: {}", e))?;
+    let mut w = BufWriter::with_capacity(8 * 1024 * 1024, file);
+
+    // GeoKeyDirectoryTag VLR data (record_id 34735):
+    //   keys: GTModelType=1(projected), GTRasterType=1(PixelIsArea),
+    //         ProjectedCSType=EPSG utm
+    let mut vlr_data: Vec<u8> = Vec::new();
+    let keys: [u16; 16] = [
+        1, 1, 0, 3, // dir header: version 1, rev 1.0, 3 keys
+        1024, 0, 1, 1, // GTModelTypeGeoKey = Projected
+        1025, 0, 1, 1, // GTRasterTypeGeoKey = RasterPixelIsArea
+        3072, 0, 1, epsg as u16, // ProjectedCSTypeGeoKey
+    ];
+    for k in keys {
+        vlr_data.extend_from_slice(&k.to_le_bytes());
+    }
+
+    let vlr_len = 54 + vlr_data.len();
+    let npts = coords.len() as u32;
+
+    let mut header = [0u8; 227];
+    header[0..4].copy_from_slice(b"LASF");
+    header[24] = 1; // version major
+    header[25] = 2; // version minor
+    let sys_id = b"EKDRSHTI-v2";
+    header[26..26 + sys_id.len()].copy_from_slice(sys_id);
+    let gen_sw = b"Tactical-Engine";
+    header[58..58 + gen_sw.len()].copy_from_slice(gen_sw);
+    header[94..96].copy_from_slice(&227u16.to_le_bytes()); // header size
+    header[96..100].copy_from_slice(&((227 + vlr_len) as u32).to_le_bytes()); // point data offset
+    header[100..104].copy_from_slice(&1u32.to_le_bytes()); // number of VLRs
+    header[104] = 2; // point format 2 (XYZ+RGB)
+    header[105..107].copy_from_slice(&26u16.to_le_bytes()); // record length
+    header[107..111].copy_from_slice(&npts.to_le_bytes()); // legacy point count
+    // legacy points-by-return: all in return 1
+    header[111..115].copy_from_slice(&npts.to_le_bytes());
+    header[131..139].copy_from_slice(&scale.to_le_bytes());
+    header[139..147].copy_from_slice(&scale.to_le_bytes());
+    header[147..155].copy_from_slice(&scale.to_le_bytes());
+    header[155..163].copy_from_slice(&min[0].to_le_bytes()); // x offset
+    header[163..171].copy_from_slice(&min[1].to_le_bytes()); // y offset
+    header[171..179].copy_from_slice(&min[2].to_le_bytes()); // z offset
+    header[179..187].copy_from_slice(&max[0].to_le_bytes());
+    header[187..195].copy_from_slice(&min[0].to_le_bytes());
+    header[195..203].copy_from_slice(&max[1].to_le_bytes());
+    header[203..211].copy_from_slice(&min[1].to_le_bytes());
+    header[211..219].copy_from_slice(&max[2].to_le_bytes());
+    header[219..227].copy_from_slice(&min[2].to_le_bytes());
+    w.write_all(&header).map_err(|e| format!("[IO] LAS header: {}", e))?;
+
+    // VLR header (54B): reserved u16, user_id 16B, record_id u16,
+    // record_len u16, description 32B
+    let mut vlr_hdr = [0u8; 54];
+    let uid = b"LASF_Projection";
+    vlr_hdr[2..2 + uid.len()].copy_from_slice(uid);
+    vlr_hdr[18..20].copy_from_slice(&34735u16.to_le_bytes());
+    vlr_hdr[20..22].copy_from_slice(&(vlr_data.len() as u16).to_le_bytes());
+    let desc = b"OGC GeoTIFF (UTM)";
+    vlr_hdr[22..22 + desc.len()].copy_from_slice(desc);
+    w.write_all(&vlr_hdr).map_err(|e| format!("[IO] LAS VLR: {}", e))?;
+    w.write_all(&vlr_data).map_err(|e| format!("[IO] LAS VLR data: {}", e))?;
+
+    let mut buf = Vec::with_capacity(coords.len() * 26);
+    for (i, c) in coords.iter().enumerate() {
+        let xi = ((c.0 - min[0]) / scale).round() as i32;
+        let yi = ((c.1 - min[1]) / scale).round() as i32;
+        let zi = ((c.2 - min[2]) / scale).round() as i32;
+        buf.extend_from_slice(&xi.to_le_bytes());
+        buf.extend_from_slice(&yi.to_le_bytes());
+        buf.extend_from_slice(&zi.to_le_bytes());
+        buf.extend_from_slice(&1000u16.to_le_bytes()); // intensity
+        buf.push(0b0000_1001); // return 1 of 1
+        buf.push(if c.2 > 4.0 { 5 } else { 2 }); // classification: veg vs ground
+        buf.push(0); // scan angle
+        buf.push(0); // user data
+        buf.extend_from_slice(&0u16.to_le_bytes()); // point source id
+        buf.extend_from_slice(&((pts[i].3 as u16) << 8).to_le_bytes());
+        buf.extend_from_slice(&((pts[i].4 as u16) << 8).to_le_bytes());
+        buf.extend_from_slice(&((pts[i].5 as u16) << 8).to_le_bytes());
+    }
+    w.write_all(&buf).map_err(|e| format!("[IO] LAS points: {}", e))?;
+    w.flush().map_err(|e| format!("[IO] LAS flush: {}", e))?;
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1850,6 +2401,7 @@ mod tests {
             yaw_deg: 0.0,
             gimbal_pitch_deg: None,
             focal_len: None,
+            ..Default::default()
         };
         let pose = camera_pose_from_telemetry(&origin, &origin, 6_378_137.0);
 
@@ -1877,6 +2429,7 @@ mod tests {
             yaw_deg: 0.0,
             gimbal_pitch_deg: None,
             focal_len: None,
+            ..Default::default()
         };
         let pose = camera_pose_from_telemetry(&origin, &origin, 6_378_137.0);
 
@@ -2012,6 +2565,7 @@ mod tests {
             HardwareProfile::Balanced,
             -45.0,
             out_dir,
+            None,
         );
         eprintln!("[baseline] elapsed={:?} result={:?}", t0.elapsed(), res);
         assert!(res.is_ok(), "pipeline failed: {:?}", res.err());
@@ -2064,34 +2618,175 @@ mod tests {
     }
 
     #[test]
-    fn test_las_header_bounds_offsets() {
-        let mut header = [0u8; 227];
-        let max_x: f64 = 123.456;
-        let min_x: f64 = -45.678;
-        let max_y: f64 = 890.123;
-        let min_y: f64 = 12.345;
-        let max_z: f64 = 55.555;
-        let min_z: f64 = 1.111;
+    fn test_las_roundtrip_utm() {
+        // M2 regression: LAS must carry real UTM coordinates — decoded
+        // (int*scale + offset) values must land near the expected UTM
+        // easting/northing for the origin, and the CRS VLR must exist.
+        let origin = (0.394027, 36.883815); // KABR site
+        let pts = vec![
+            (0.0f64, 0.0f64, 0.0f64, 100u8, 110u8, 90u8),
+            (10.0, 5.0, 2.0, 80, 90, 70),
+            (-20.0, -8.0, -1.5, 60, 70, 55),
+        ];
+        let tmp = std::env::temp_dir().join("test_roundtrip.las");
+        write_las(&tmp, &pts, origin.0, origin.1).unwrap();
+        let bytes = fs::read(&tmp).unwrap();
+        let _ = fs::remove_file(&tmp);
 
-        header[179..187].copy_from_slice(&max_x.to_le_bytes());
-        header[187..195].copy_from_slice(&min_x.to_le_bytes());
-        header[195..203].copy_from_slice(&max_y.to_le_bytes());
-        header[203..211].copy_from_slice(&min_y.to_le_bytes());
-        header[211..219].copy_from_slice(&max_z.to_le_bytes());
-        header[219..227].copy_from_slice(&min_z.to_le_bytes());
+        assert_eq!(&bytes[0..4], b"LASF");
+        let header_size = u16::from_le_bytes(bytes[94..96].try_into().unwrap()) as usize;
+        let pt_off = u32::from_le_bytes(bytes[96..100].try_into().unwrap()) as usize;
+        let n_vlr = u32::from_le_bytes(bytes[100..104].try_into().unwrap());
+        let pt_fmt = bytes[104];
+        let pt_len = u16::from_le_bytes(bytes[105..107].try_into().unwrap()) as usize;
+        let npts = u32::from_le_bytes(bytes[107..111].try_into().unwrap()) as usize;
+        let ret1 = u32::from_le_bytes(bytes[111..115].try_into().unwrap());
+        assert_eq!(header_size, 227);
+        assert_eq!(n_vlr, 1);
+        assert_eq!(pt_fmt, 2);
+        assert_eq!(pt_len, 26);
+        assert_eq!(npts, 3);
+        assert_eq!(ret1, 3, "points-by-return[0] must equal point count");
+        assert_eq!(pt_off, 227 + 54 + 32, "point data offset must include the VLR");
 
-        let read_max_x = f64::from_le_bytes(header[179..187].try_into().unwrap());
-        let read_min_x = f64::from_le_bytes(header[187..195].try_into().unwrap());
-        let read_max_y = f64::from_le_bytes(header[195..203].try_into().unwrap());
-        let read_min_y = f64::from_le_bytes(header[203..211].try_into().unwrap());
-        let read_max_z = f64::from_le_bytes(header[211..219].try_into().unwrap());
-        let read_min_z = f64::from_le_bytes(header[219..227].try_into().unwrap());
+        // VLR declares GeoTIFF record 34735
+        assert_eq!(&bytes[header_size + 2..header_size + 17], b"LASF_Projection");
+        let rec_id = u16::from_le_bytes(bytes[header_size + 18..header_size + 20].try_into().unwrap());
+        assert_eq!(rec_id, 34735);
 
-        assert_eq!(read_max_x, max_x);
-        assert_eq!(read_min_x, min_x);
-        assert_eq!(read_max_y, max_y);
-        assert_eq!(read_min_y, min_y);
-        assert_eq!(read_max_z, max_z);
-        assert_eq!(read_min_z, min_z);
+        let (e0, n0) = wgs84_to_utm(origin.0, origin.1);
+        let scale = f64::from_le_bytes(bytes[131..139].try_into().unwrap());
+        let off_x = f64::from_le_bytes(bytes[155..163].try_into().unwrap());
+        let off_y = f64::from_le_bytes(bytes[163..171].try_into().unwrap());
+        let off_z = f64::from_le_bytes(bytes[171..179].try_into().unwrap());
+        assert!((scale - 0.001).abs() < 1e-9);
+        assert!(off_x > 0.0 && off_y > 0.0, "offsets must be non-zero now (UTM)");
+
+        for (i, p) in pts.iter().enumerate() {
+            let base = pt_off + i * pt_len;
+            let xi = i32::from_le_bytes(bytes[base..base + 4].try_into().unwrap());
+            let yi = i32::from_le_bytes(bytes[base + 4..base + 8].try_into().unwrap());
+            let zi = i32::from_le_bytes(bytes[base + 8..base + 12].try_into().unwrap());
+            let x = xi as f64 * scale + off_x;
+            let y = yi as f64 * scale + off_y;
+            let z = zi as f64 * scale + off_z;
+            assert!((x - (e0 + p.0)).abs() < 0.002, "easting err {} vs {}", x, e0 + p.0);
+            assert!((y - (n0 + p.1)).abs() < 0.002);
+            assert!((z - p.2).abs() < 0.002);
+            // RGB encoded <<8
+            let r = u16::from_le_bytes(bytes[base + 20..base + 22].try_into().unwrap());
+            assert_eq!((r >> 8) as u8, p.3);
+            // return number byte = 1/1
+            assert_eq!(bytes[base + 14], 0b0000_1001);
+        }
+    }
+
+    #[test]
+    fn test_utm_known_point() {
+        // Nairobi CBD ≈ -1.2921, 36.8219 → UTM 37S ≈ (258,505 E, 9,857,071 N)
+        let (e, n) = wgs84_to_utm(-1.2921, 36.8219);
+        // pyproj-verified: (257634.502, 9857079.966)
+        assert!((e - 257_634.502).abs() < 0.05, "easting {e} off by >5cm");
+        assert!((n - 9_857_079.966).abs() < 0.05, "northing {n} off by >5cm");
+        // KABR site lat 0.394N → UTM 37N
+        let (zone, epsg, _) = utm_zone_epsg(0.394, 36.884);
+        assert_eq!(zone, 37);
+        assert_eq!(epsg, 32637);
+    }
+
+    #[test]
+    fn test_yaw_wrap_lerp() {
+        // 359° -> 1° must go forward by 2°, not backward by 358°
+        let y = lerp_yaw(359.0, 1.0, 0.5);
+        assert!((y - 0.0).abs() < 1e-4 || (y - 360.0).abs() < 1e-4, "yaw lerp gave {y}");
+        let y2 = lerp_yaw(10.0, 350.0, 0.5);
+        assert!((y2 - 360.0).abs() < 1e-4 || y2.abs() < 1e-4 || (y2 - 0.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_parse_dji_srt_new_format() {
+        // New DJI key layout (Mavic 3 / newer): drone_lat, rel_alt, gb_* keys
+        let srt = "\
+1\n\
+00:00:00,000 --> 00:00:00,033\n\
+<font size=\"36\">FrameCnt : 1, DiffTime : 33ms\n\
+2024-06-01 10:00:00,000,000\n\
+[iso : 100] [shutter : 1/500] [fnum : 170] [ev : 0] [focal_len : 240] [drone_latitude : 0.400000] [drone_longitude : 36.900000] [rel_alt : 30.5] [abs_alt : 1650.2] [gb_pitch : -60.0] [gb_yaw : 5.0] [gb_roll : 0.0]\n\
+</font>\n";
+        let temp_path = std::env::temp_dir().join("test_new_fmt.srt");
+        fs::write(&temp_path, srt).unwrap();
+        let pts = parse_dji_srt(temp_path.to_str().unwrap()).unwrap();
+        let _ = fs::remove_file(&temp_path);
+        assert_eq!(pts.len(), 1);
+        assert!((pts[0].latitude - 0.4).abs() < 1e-6);
+        assert!((pts[0].altitude_m - 30.5).abs() < 1e-3, "rel_alt must be used for altitude");
+        assert_eq!(pts[0].gimbal_pitch_deg, Some(-60.0));
+        assert_eq!(pts[0].frame_cnt, Some(1));
+    }
+
+    #[test]
+    fn test_missing_altitude_is_error() {
+        let srt = "\
+1\n\
+00:00:00,000 --> 00:00:00,033\n\
+<font size=\"36\">SrtCnt : 1, DiffTime : 33ms\n\
+[latitude: 0.394028] [longitude: 36.883816]\n\
+</font>\n";
+        let temp_path = std::env::temp_dir().join("test_no_alt.srt");
+        fs::write(&temp_path, srt).unwrap();
+        let mut pts = parse_dji_srt(temp_path.to_str().unwrap()).unwrap();
+        let _ = fs::remove_file(&temp_path);
+        assert_eq!(pts.len(), 1);
+        assert!(!pts[0].altitude_m.is_finite());
+        let res = validate_telemetry(&mut pts);
+        assert!(res.is_err(), "telemetry with zero altitude must be an error");
+    }
+
+    #[test]
+    fn test_csv_px4_columns() {
+        let csv = "\
+timestamp,latitude,longitude,altitude_amsl,relative_alt,yaw,pitch,roll\n\
+0.0,0.394027,36.883815,1510.0,20.0,90.0,0.0,0.0\n\
+1.0,0.394030,36.883900,1510.5,20.5,91.0,0.5,0.0\n";
+        let tmp = std::env::temp_dir().join("test_px4.csv");
+        fs::write(&tmp, csv).unwrap();
+        let pts = parse_telemetry_csv(tmp.to_str().unwrap()).unwrap();
+        let _ = fs::remove_file(&tmp);
+        assert_eq!(pts.len(), 2);
+        // relative_alt (AGL) must win over altitude_amsl
+        assert!((pts[0].altitude_m - 20.0).abs() < 1e-3, "AGL must win, got {}", pts[0].altitude_m);
+        assert!((pts[1].yaw_deg - 91.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_sync_offset_recovers_trim() {
+        // Synthetic: 200 s telemetry (10 Hz), aperiodic speed profile;
+        // video is a 30-frame window starting at telemetry second 12.
+        // Estimator must recover offset ≈ 12.
+        let mut pts = Vec::new();
+        let earth_r = 6_378_137.0f64;
+        let deg_per_m = 180.0 / (std::f64::consts::PI * earth_r);
+        let mut t = 0.0f32;
+        let mut x_m = 0.0f64;
+        let speed = |tt: f32| 4.0 + 3.0 * (tt / 9.0).sin() + 1.5 * (tt / 2.7).sin();
+        for _ in 0..2000 {
+            x_m += speed(t) as f64 * 0.1;
+            pts.push(FlightPoint {
+                timestamp_sec: t,
+                latitude: 0.394027,
+                longitude: 36.883815 + x_m * deg_per_m,
+                altitude_m: 20.0,
+                yaw_deg: 90.0,
+                ..Default::default()
+            });
+            t += 0.1;
+        }
+        let offset = 12.0f32;
+        let motion: Vec<f32> = (0..30)
+            .map(|i| speed(offset + i as f32 + 0.5) * 10.0)
+            .collect();
+        let (est, conf) = estimate_sync_offset(&pts, &motion);
+        assert!((est - offset).abs() < 1.5, "offset est {est} vs {offset}");
+        assert!(conf > 0.5, "confidence {conf} too low on synthetic");
     }
 }
