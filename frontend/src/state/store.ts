@@ -5,7 +5,7 @@
 
 export type HardwareProfile = 'edge_fast' | 'balanced' | 'high_accuracy';
 export type ViewMode = 'mesh' | 'points';
-export type ColorMode = 'rgb' | 'elevation';
+export type ColorMode = 'rgb' | 'elevation' | 'confidence' | 'hillshade';
 export type ViewportBg = 'dark' | 'mid';
 export type RunStatus = 'idle' | 'running' | 'done' | 'error';
 export type StageId =
@@ -68,6 +68,18 @@ export interface AppState {
   measurements: Measurement[];
   georef: Record<string, unknown> | null;
   consoleFilter: 'all' | 'info' | 'warn' | 'error';
+  /** hide vertices with no real frame evidence (hole-filled) */
+  hideUnobserved: boolean;
+  /** vertical exaggeration multiplier (1 = true) */
+  reliefExag: number;
+  /** flood level in metres (scene Y) or null when off */
+  floodLevel: number | null;
+  /** capture report JSON of the last run */
+  captureReport: Record<string, unknown> | null;
+  /** region-selection tool active in the viewport */
+  regionTool: 'off' | 'lasso' | 'box';
+  /** GNSS integrity summary string ('OK'/'Suspect'/'—') for the status bar */
+  gpsIntegrity: string;
 }
 
 export function freshStages(): Record<StageId, StageInfo> {
@@ -153,6 +165,12 @@ export function createInitialState(): AppState {
     measurements: [],
     georef: null,
     consoleFilter: 'all',
+    hideUnobserved: false,
+    reliefExag: 1,
+    floodLevel: null,
+    captureReport: null,
+    regionTool: 'off',
+    gpsIntegrity: '—',
   };
 }
 

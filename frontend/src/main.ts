@@ -13,7 +13,7 @@ import './styles/layout.css';
 
 import * as THREE from 'three';
 import { store, freshStages } from './state/store.ts';
-import { backend, EXPORT_FILES } from './pipeline/backend.ts';
+import { backend, EXPORT_FILES, exportUrl } from './pipeline/backend.ts';
 import { inferStageEvents, parseFramesExtracted, parseFrameProgress, STAGE_ORDER, STAGE_LABELS } from './pipeline/logParser.ts';
 import { initTooltips } from './ui/Tooltip.ts';
 import { toast } from './ui/Toast.ts';
@@ -28,7 +28,12 @@ import { ConsolePanel } from './panels/ConsolePanel.ts';
 import { PipelinePanel, applyStageEvents } from './panels/PipelinePanel.ts';
 import { OutputsPanel } from './panels/OutputsPanel.ts';
 import { StatusBar } from './panels/StatusBar.ts';
+import { FramesPanel } from './panels/FramesPanel.ts';
 import { Viewer } from './viewer/Viewer.ts';
+import { Provenance } from './features/provenance.ts';
+import { Analysis } from './features/analysis.ts';
+import { Section, field } from './ui/Panel.ts';
+import { Slider } from './ui/Slider.ts';
 import type { ViewPreset } from './viewer/controls.ts';
 
 /* ────────────────────────────────────────────────────────────
@@ -85,6 +90,11 @@ const viewportWrap = el('div', 'viewport-wrap');
 const dock = el('div', 'panel panel-bottom');
 
 const viewer = new Viewer(viewportWrap);
+const provenance = new Provenance(viewer);
+const analysis = new Analysis(viewer, provenance);
+const framesPanel = new FramesPanel();
+framesPanel.setProvenance(provenance);
+provenance.onLog = (m) => consolePanel.add(m);
 store.set('gpuName', shortGpu(viewer.gpuName));
 // Debug/testing handle (harmless in production).
 (window as unknown as Record<string, unknown>).__viewer = viewer;
@@ -105,6 +115,7 @@ const dockHeader = el('div', 'dock-header');
 const tabs = new Tabs([
   { id: 'console', label: 'Console', icon: 'terminal', badge: () => String(consolePanel.count()) || null },
   { id: 'pipeline', label: 'Pipeline', icon: 'layers' },
+  { id: 'frames', label: 'Frames', icon: 'camera' },
   { id: 'outputs', label: 'Outputs', icon: 'package' },
 ]);
 dockHeader.appendChild(tabs.el);
@@ -117,12 +128,14 @@ dock.appendChild(dockHeader);
 const dockBody = el('div', 'dock-body');
 dockBody.appendChild(consolePanel.el);
 dockBody.appendChild(pipelinePanel.el);
+dockBody.appendChild(framesPanel.el);
 dockBody.appendChild(outputsPanel.el);
 dock.appendChild(dockBody);
 
 function selectDockTab(id: string): void {
   consolePanel.el.style.display = id === 'console' ? '' : 'none';
   pipelinePanel.el.style.display = id === 'pipeline' ? '' : 'none';
+  framesPanel.el.style.display = id === 'frames' ? '' : 'none';
   outputsPanel.el.style.display = id === 'outputs' ? '' : 'none';
 }
 selectDockTab('console');
@@ -246,7 +259,7 @@ setDockCollapsed(layout.dockCollapsed);
 
 function downloadArtifact(file: string): void {
   const a = document.createElement('a');
-  a.href = `${file}?v=${Date.now()}`;
+  a.href = exportUrl(file);
   a.download = file.split('/').pop() ?? 'export';
   document.body.appendChild(a);
   a.click();
@@ -381,6 +394,55 @@ store.on('measureMode', (on) => {
 });
 toolbar.appendChild(measureBtn);
 
+/* ── selection tools (T4/T5) ─────────────────────────────── */
+toolbar.appendChild(el('div', 'tb-sep'));
+const g4 = el('div', 'tb-group');
+const lassoBtn = toolBtn('lasso', 'Lasso', 'L', () => setRegionTool('lasso'));
+const boxBtn = toolBtn('square', 'Box', 'B', () => setRegionTool('box'));
+const regenBtn = toolBtn('refresh', 'Regen', '', () => doRegen());
+const undoBtn = toolBtn('undo', 'Undo', '', () => {
+  if (provenance.undo()) toast('info', 'Undo', 'Previous buffers restored');
+});
+const rebuildBtn = toolBtn('layers', 'Rebuild', '', () => void doRebuild());
+g4.append(lassoBtn, boxBtn, regenBtn, undoBtn, rebuildBtn);
+toolbar.appendChild(g4);
+
+function setRegionTool(t: 'off' | 'lasso' | 'box'): void {
+  const next = store.get('regionTool') === t ? 'off' : t;
+  store.set('regionTool', next);
+}
+store.on('regionTool', (t) => {
+  provenance.setTool(t);
+  lassoBtn.classList.toggle('active', t === 'lasso');
+  boxBtn.classList.toggle('active', t === 'box');
+});
+
+function doRegen(): void {
+  const r = provenance.regenerateRegion();
+  if (r) {
+    toast('success', 'Region regenerated',
+      `${r.replaced.toLocaleString('en-US')} points replaced from ${r.frames} excluded frame(s) in ${r.ms.toFixed(0)} ms`);
+  } else {
+    toast('info', 'Nothing to regenerate',
+      'Lasso a region (L) and exclude frames (right-click) first');
+  }
+}
+
+async function doRebuild(): Promise<void> {
+  const range = provenance.getFrameRange();
+  if (!range) {
+    toast('info', 'No frames selected', 'Select frames in the Frames dock first.');
+    return;
+  }
+  const t0 = performance.now();
+  await startRun({
+    frameRange: range,
+    excludedFrames: [...provenance.excluded],
+  });
+  toast('success', 'Rebuild complete',
+    `Rebuilt from frames ${range[0]}–${range[1]} in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
+}
+
 toolbar.appendChild(el('div', 'tb-spacer'));
 
 /* ── Modals ───────────────────────────────────────────────── */
@@ -509,7 +571,10 @@ function syncLoadingOverlay(): void {
   viewer.setLoading(`${stage}…`);
 }
 
-async function startRun(): Promise<void> {
+async function startRun(opts?: {
+  frameRange?: [number, number] | null;
+  excludedFrames?: number[] | null;
+}): Promise<void> {
   const video = store.get('video');
   if (!video || store.get('status') === 'running') return;
 
@@ -535,6 +600,8 @@ async function startRun(): Promise<void> {
       telemetryPath: telemetry?.path ?? '',
       hardwareProfile: store.get('hardwareProfile'),
       cameraPitchDeg: store.get('cameraPitchDeg'),
+      frameRange: opts?.frameRange ?? null,
+      excludedFrames: opts?.excludedFrames ?? null,
     });
 
     const url = await backend.modelUrl();
@@ -554,11 +621,34 @@ async function startRun(): Promise<void> {
 
     // Scene info — fetch georef JSON; show "—" fields if unavailable.
     try {
-      const res = await fetch(`/recon_georeference.json?v=${Date.now()}`);
+      const gp = backend.artifactPath('georef');
+      const res = await fetch(gp ? backend.artifactUrl(gp) : `/recon_georeference.json?v=${Date.now()}`);
       store.set('georef', res.ok ? ((await res.json()) as Record<string, unknown>) : null);
     } catch {
       store.set('georef', null);
     }
+    // capture report + provenance artifacts
+    try {
+      const rp = backend.artifactPath('capture_report');
+      if (rp) {
+        const res = await fetch(backend.artifactUrl(rp));
+        store.set('captureReport', res.ok ? ((await res.json()) as Record<string, unknown>) : null);
+      }
+    } catch {
+      store.set('captureReport', null);
+    }
+    if (await provenance.load()) {
+      // confidence field for the colour mode + accuracy readouts
+      const g = viewer.getGeometry();
+      if (g && provenance.confidence) g.userData.confidence = provenance.confidence;
+      framesPanel.refresh();
+      provenance.applyTints();
+      updateGpsIndicator();
+    } else {
+      framesPanel.refresh();
+      store.set('gpsIntegrity', '—');
+    }
+    updateLimits();
     outputsPanel.refresh();
     inspector.renderExports('refresh');
   } catch (err: unknown) {
@@ -586,6 +676,33 @@ async function startRun(): Promise<void> {
 
 project.onStart = () => void startRun();
 
+/** T9 — GNSS integrity indicator from per-frame agreement flags. */
+function updateGpsIndicator(): void {
+  if (!provenance.cams.length) {
+    store.set('gpsIntegrity', '—');
+    return;
+  }
+  const bad = provenance.cams.filter((c) => !c.gps_ok).length;
+  const frac = bad / provenance.cams.length;
+  store.set('gpsIntegrity', frac > 0.15 ? `Suspect (${bad}/${provenance.cams.length})` : `OK (${provenance.cams.length - bad}/${provenance.cams.length})`);
+}
+
+/** T15 — refresh the Accuracy & Limits section numbers. */
+function updateLimits(): void {
+  const g = viewer.getGeometry();
+  if (!g || !provenance.frameIds) return;
+  let holes = 0;
+  for (let i = 0; i < provenance.frameIds.length; i++) {
+    if (provenance.frameIds[i] === 65535) holes++;
+  }
+  inspector.updateLimits({
+    holePct: (holes / provenance.frameIds.length) * 100,
+    syncOff: (store.get('captureReport')?.sync_offset_sec as number) ?? null,
+    syncConf: (store.get('captureReport')?.sync_confidence as number) ?? null,
+    gpsIntegrity: store.get('gpsIntegrity'),
+  });
+}
+
 /* ── Empty state + measure wiring ─────────────────────────── */
 
 function showEmptyState(): void {
@@ -598,7 +715,36 @@ if (!viewer.hasModel()) showEmptyState();
 
 viewer.onCursor = (p) => store.set('cursor', p);
 
-viewer.onModelClick = (p) => {
+viewer.onModelClick = (p, idx) => {
+  // Viewshed arm: click sets the observer point.
+  if (viewshedArmed) {
+    viewshedArmed = false;
+    const r = analysis.viewshed(p, 2);
+    if (r) {
+      toast('success', 'Viewshed',
+        `${r.visible.toLocaleString('en-US')} visible · ${r.dead.toLocaleString('en-US')} dead ground (est.)`);
+      setAnalysisText(`<div class="footnote">Viewshed: ${r.visible.toLocaleString('en-US')} visible / ${r.dead.toLocaleString('en-US')} dead ground cells (est.)</div>`);
+    }
+    return;
+  }
+  // Provenance: plain click (not measuring, no region tool) selects the
+  // vertex's source frame and flashes it in the filmstrip.
+  if (!store.get('measureMode') && store.get('regionTool') === 'off') {
+    if (idx >= 0 && provenance.frameIds) {
+      const f = provenance.frameIds[idx];
+      if (f !== 65535) {
+        provenance.selected.clear();
+        provenance.selected.add(f);
+        provenance.refreshMarkers();
+        provenance.applyTints();
+        provenance.onChange?.();
+        const cam = provenance.cams.find((c) => c.frame === f);
+        toast('info', `Vertex → frame F${f}`,
+          cam ? `t=${cam.time_s.toFixed(0)}s · sharp ${cam.sharpness.toFixed(0)} · ${cam.gps_ok ? 'GPS ok' : 'GPS disagree'}` : 'hole-filled');
+      }
+    }
+    return;
+  }
   if (!store.get('measureMode')) return;
   const pending = store.get('measurePending');
   if (!pending) {
@@ -616,6 +762,132 @@ store.on('measurements', (ms) => {
   viewer.measure.clearAll();
   for (const m of ms) viewer.measure.add(m);
 });
+
+/* ── Terrain analysis bindings (T7/T8/T11–T14) ────────────── */
+
+store.on('hideUnobserved', (v) => analysis.setUnobservedHidden(v));
+store.on('reliefExag', (v) => analysis.setExaggeration(v));
+
+let viewshedArmed = false;
+let lzMarkers: THREE.Object3D[] = [];
+
+const analysisSection = new Section('Analysis (2.5D)');
+{
+  const floodSlider = new Slider(0, 30, 0.5, 0, ' m');
+  let floodOn = el('button', 'toggle');
+  floodOn.setAttribute('role', 'switch');
+  const floodRow = el('div');
+  floodRow.style.cssText = 'display:flex;align-items:center;justify-content:space-between;';
+  floodRow.appendChild(el('span', 'field-label', 'Flood level'));
+  floodRow.appendChild(floodOn);
+  floodOn.addEventListener('click', () => {
+    const on = !floodOn.classList.contains('on');
+    floodOn.classList.toggle('on', on);
+    applyFlood(on ? floodSlider.getValue() : null);
+  });
+  floodSlider.onChange((v: number) => {
+    if (floodOn.classList.contains('on')) applyFlood(v);
+  });
+  analysisSection.body.appendChild(floodRow);
+  analysisSection.body.appendChild(field('Level', floodSlider.el));
+
+  const row = el('div', 'toolbar');
+  row.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;margin:6px 0;';
+  const lzBtn = el('button', 'btn', 'Find landing zones');
+  lzBtn.style.flex = '1';
+  lzBtn.addEventListener('click', () => findLZ());
+  const vsBtn = el('button', 'btn', 'Viewshed (click model)');
+  vsBtn.style.flex = '1';
+  vsBtn.addEventListener('click', () => {
+    viewshedArmed = !viewshedArmed;
+    vsBtn.classList.toggle('btn-accent', viewshedArmed);
+    if (viewshedArmed) toast('info', 'Viewshed', 'Click a point on the model = observer (+2 m)');
+  });
+  const rmBtn = el('button', 'btn', 'Measure region');
+  rmBtn.style.flex = '1';
+  rmBtn.addEventListener('click', () => measureRegion());
+  const clearBtn = el('button', 'btn', 'Clear overlays');
+  clearBtn.style.flex = '1';
+  clearBtn.addEventListener('click', () => clearAnalysis());
+  row.append(lzBtn, vsBtn, rmBtn, clearBtn);
+  analysisSection.body.appendChild(row);
+  analysisSection.body.appendChild(el('div', 'footnote',
+    'All values estimated from the fused heightmap; no facades in Rapid 2.5D.'));
+  const analysisResults = el('div');
+  analysisResults.id = 'analysisResults';
+  analysisSection.body.appendChild(analysisResults);
+}
+// Append analysis before Exports for readability
+inspector.panel.body.insertBefore(analysisSection.el, inspector.panel.body.lastChild);
+
+function setAnalysisText(html: string): void {
+  const node = document.getElementById('analysisResults');
+  if (node) node.innerHTML = html;
+}
+
+function applyFlood(level: number | null): void {
+  const r = analysis.setFlood(level);
+  if (r) setAnalysisText(`<div class="footnote">Flooded area ≈ ${r.area.toFixed(0)} m² (est.)</div>`);
+  else if (level === null) setAnalysisText('');
+}
+
+function findLZ(): void {
+  for (const m of lzMarkers) viewer.scene.remove(m);
+  lzMarkers = [];
+  const zones = analysis.findLandingZones(25, 7);
+  if (!zones.length) {
+    toast('info', 'Landing zones', 'No patch ≥25×25 m with slope <7° found.');
+    setAnalysisText('<div class="footnote">No qualifying landing zones (est.).</div>');
+    return;
+  }
+  const mk = new THREE.SphereGeometry(2, 10, 8);
+  for (const z of zones.slice(0, 8)) {
+    const m = new THREE.Mesh(mk, new THREE.MeshBasicMaterial({ color: 0x4ea84e }));
+    const g = viewer.getGeometry();
+    let y = 1;
+    if (g) {
+      const pos = g.getAttribute('position');
+      let best = 0, bd = 1e9;
+      for (let i = 0; i < pos.count; i += 7) {
+        const d = Math.hypot(pos.getX(i) - z.x, pos.getZ(i) - z.z);
+        if (d < bd) { bd = d; best = pos.getY(i); }
+      }
+      y = best + 2;
+    }
+    m.position.set(z.x, y, z.z);
+    viewer.scene.add(m);
+    lzMarkers.push(m);
+  }
+  const rows = zones.slice(0, 8)
+    .map((z, i) => `<div class="footnote">LZ${i + 1}: ${z.side.toFixed(0)} m pad · slope ${z.slopeDeg.toFixed(1)}° · conf ${z.conf.toFixed(2)}</div>`)
+    .join('');
+  setAnalysisText(rows);
+  toast('success', 'Landing zones', `${zones.length} candidate pad(s) marked (est.)`);
+}
+
+function measureRegion(): void {
+  const r = analysis.regionMeasure();
+  if (!r) {
+    toast('info', 'Measure region', 'Draw a lasso/box region first.');
+    return;
+  }
+  const conf = r.conf;
+  const sig = (0.05 + 0.15 * (1 - conf)) * Math.sqrt(r.area); // crude σ estimate
+  setAnalysisText(
+    `<div class="footnote">Region area ≈ ${r.area.toFixed(0)} m² · ` +
+    `cut/fill volume ≈ ${r.volume.toFixed(0)} m³ (≈${(r.volume / 10).toFixed(0)} truckloads @10 m³) · ` +
+    `±${sig.toFixed(0)} m² (est., conf ${conf.toFixed(2)})</div>`);
+  toast('success', 'Region measured',
+    `${r.area.toFixed(0)} m² · ${r.volume.toFixed(0)} m³ (est.)`);
+}
+
+function clearAnalysis(): void {
+  analysis.setFlood(null);
+  for (const m of lzMarkers) viewer.scene.remove(m);
+  lzMarkers = [];
+  setAnalysisText('');
+  provenance.applyTints();
+}
 
 /* ── Store → viewer bindings ──────────────────────────────── */
 
@@ -645,6 +917,19 @@ document.addEventListener('keydown', (e) => {
   if (typing) return;
 
   switch (e.key) {
+    case 'l':
+    case 'L':
+      setRegionTool('lasso');
+      break;
+    case 'b':
+    case 'B':
+      setRegionTool('box');
+      break;
+    case 'x':
+    case 'X':
+      // toggle exclude on the selected frames
+      for (const f of [...provenance.selected]) provenance.toggleExclude(f);
+      break;
     case 'f':
     case 'F':
       viewer.frameAll();
@@ -672,7 +957,11 @@ document.addEventListener('keydown', (e) => {
       showShortcuts();
       break;
     case 'Escape':
-      if (store.get('measurePending')) {
+      if (store.get('regionTool') !== 'off') {
+        store.set('regionTool', 'off');
+      } else if (provenance.regionMask || provenance.selected.size) {
+        provenance.clearAll();
+      } else if (store.get('measurePending')) {
         store.set('measurePending', null);
         viewer.measure.setPendingPoint(null);
       } else if (store.get('measureMode')) {

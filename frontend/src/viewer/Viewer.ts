@@ -37,6 +37,8 @@ export class Viewer {
   readonly controls: OrbitControls;
   readonly measure: MeasureTool;
   readonly gpuName: string;
+  /** PLY→scene translation applied in loadModel (for provenance overlays). */
+  readonly translateVec = new THREE.Vector3();
 
   private grid: THREE.GridHelper;
   private gizmo: AxisGizmo;
@@ -64,7 +66,9 @@ export class Viewer {
   onCursor: ((pos: [number, number, number] | null) => void) | null = null;
   onStats: ((points: number, faces: number, fps: number) => void) | null = null;
   /** Called on any left-click that hits the model (used by the measure tool). */
-  onModelClick: ((point: THREE.Vector3) => void) | null = null;
+  onModelClick: ((point: THREE.Vector3, index: number) => void) | null = null;
+  /** Invoked after applyColorMode in renderModel — lets selection tints reapply. */
+  afterColor: (() => void) | null = null;
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -130,8 +134,8 @@ export class Viewer {
     });
     this.canvas.addEventListener('pointerdown', (e) => {
       if (e.button !== 0 || !this.onModelClick) return;
-      const p = this.pickAt(e.clientX, e.clientY);
-      if (p) this.onModelClick(p);
+      const hit = this.pickVertexAt(e.clientX, e.clientY);
+      if (hit) this.onModelClick(hit.point, hit.index);
     });
 
     this.animate();
@@ -207,6 +211,7 @@ export class Viewer {
     bbox.getCenter(center);
     // Bounding-box centre → world origin; minimum Y rests on the grid plane.
     geometry.translate(-center.x, -bbox.min.y, -center.z);
+    this.translateVec.set(-center.x, -bbox.min.y, -center.z);
 
     this.disposeModel();
     this.geometry = geometry;
@@ -237,6 +242,7 @@ export class Viewer {
     }
 
     applyColorMode(this.geometry, this.colorMode);
+    this.afterColor?.();
     const wantMesh = this.mode === 'mesh' && Boolean(this.geometry.index);
     if (wantMesh) {
       const mesh = new THREE.Mesh(
@@ -322,12 +328,32 @@ export class Viewer {
 
   /** Raycast the model (via the points proxy) at viewport px coords. */
   pickAt(clientX: number, clientY: number): THREE.Vector3 | null {
+    const hit = this.pickVertexAt(clientX, clientY);
+    return hit ? hit.point : null;
+  }
+
+  /** Like pickAt but also returns the vertex index (provenance lookups). */
+  pickVertexAt(clientX: number, clientY: number): { point: THREE.Vector3; index: number } | null {
     if (!this.raycastProxy) return null;
     const r = this.canvas.getBoundingClientRect();
     this.ndc.set(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
     this.raycaster.setFromCamera(this.ndc, this.camera);
     const hits = this.raycaster.intersectObject(this.raycastProxy, false);
-    return hits.length ? hits[0].point : null;
+    if (!hits.length) return null;
+    const h = hits[0];
+    return { point: h.point, index: (h as { index?: number }).index ?? -1 };
+  }
+
+  /** Geometry of the loaded model (selection/analysis features). */
+  getGeometry(): THREE.BufferGeometry | null {
+    return this.geometry;
+  }
+
+  /** Set whether the mesh triangulation is rendered (false = wireframe holes visible). */
+  setIndex(idx: THREE.BufferAttribute | null): void {
+    if (!this.geometry) return;
+    this.geometry.setIndex(idx);
+    this.renderModel();
   }
 
   hasModel(): boolean {

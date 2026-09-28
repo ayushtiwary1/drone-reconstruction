@@ -14,6 +14,7 @@ export class StatusBar {
   private elapsedEl: HTMLSpanElement;
   private cursorEl: HTMLSpanElement;
   private gpuEl: HTMLSpanElement;
+  private gpsEl!: HTMLSpanElement;
   private timer: number | null = null;
 
   constructor() {
@@ -35,6 +36,9 @@ export class StatusBar {
 
     this.cursorEl = el('span', 'st-item mono', 'cursor —');
     this.el.appendChild(this.cursorEl);
+    this.gpsEl = el('span', 'st-item mono', 'GPS —');
+    this.gpsEl.setAttribute('data-tooltip', 'GPS integrity (visual cross-check)');
+    this.el.appendChild(this.gpsEl);
     this.gpuEl = el('span', 'st-item mono', '');
     this.el.appendChild(this.gpuEl);
 
@@ -47,6 +51,14 @@ export class StatusBar {
     store.bind('gpuName', (g) => {
       this.gpuEl.textContent = `GPU ${g}`;
       this.gpuEl.setAttribute('data-tooltip', g);
+    });
+    store.bind('gpsIntegrity', (v) => {
+      this.gpsEl.textContent = `GPS ${v}`;
+      this.gpsEl.style.color = String(v).startsWith('Suspect')
+        ? '#e2a7a7'
+        : String(v).startsWith('OK')
+          ? '#a7e2a7'
+          : '';
     });
     store.on('runStartedAt', () => this.syncTimer());
     store.on('status', () => this.syncTimer());

@@ -58,6 +58,13 @@ import {
   RefreshCw,
   Minus,
   FileUp,
+  Lasso,
+  Waves,
+  Undo2,
+  Eye,
+  EyeOff,
+  MapPin,
+  LandPlot,
 } from 'lucide';
 
 const REGISTRY: Record<string, IconNode> = {
@@ -113,6 +120,13 @@ const REGISTRY: Record<string, IconNode> = {
   refresh: RefreshCw,
   minus: Minus,
   'file-up': FileUp,
+  lasso: Lasso,
+  waves: Waves,
+  undo: Undo2,
+  eye: Eye,
+  'eye-off': EyeOff,
+  'map-pin': MapPin,
+  'land-plot': LandPlot,
 };
 
 export type IconName = keyof typeof REGISTRY;

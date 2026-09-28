@@ -4,7 +4,7 @@
  */
 
 import { icon, el } from '../ui/icons.ts';
-import { EXPORT_FILES, exportFileSize, formatBytes } from '../pipeline/backend.ts';
+import { EXPORT_FILES, exportFileSize, exportUrl, formatBytes } from '../pipeline/backend.ts';
 
 export class OutputsPanel {
   readonly el: HTMLDivElement;
@@ -48,7 +48,7 @@ export class OutputsPanel {
       const dlTd = el('td');
       dlTd.style.textAlign = 'right';
       const a = el('a', 'btn-icon') as HTMLAnchorElement;
-      a.href = f.file;
+      a.href = exportUrl(f.file);
       a.download = f.file.slice(1);
       a.appendChild(icon('download', 14));
       a.setAttribute('data-tooltip', `Download ${f.label}`);

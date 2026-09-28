@@ -1025,3 +1025,64 @@ input[type='range'].slider:hover::-moz-range-thumb {
   line-height: 1.5;
   padding: 6px 4px 2px;
 }
+
+/* ── Features (selection / filmstrip / analysis) ────────── */
+
+.frames-strip {
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex: 1;
+  min-height: 0;
+}
+.fs-cell {
+  position: relative;
+  flex: 0 0 auto;
+  width: 120px;
+  border: 2px solid transparent;
+  border-radius: 4px;
+  overflow: hidden;
+  cursor: pointer;
+  background: var(--bg-app);
+}
+.fs-cell img { width: 120px; height: 68px; object-fit: cover; display: block; }
+.fs-cell:hover { border-color: var(--border-strong); }
+.fs-cell.sel { border-color: var(--accent); }
+.fs-cell.exc { border-color: #d4504a; }
+.fs-cell.exc img { opacity: 0.35; }
+.fs-cell.exc::after {
+  content: 'EXC';
+  position: absolute;
+  top: 3px; left: 3px;
+  color: #d4504a; font-size: 9px; font-weight: 700;
+}
+.fs-label { font-size: 9px; color: var(--text-dim); text-align: center; padding: 2px 0; }
+.fs-badge {
+  position: absolute; top: 3px; right: 3px;
+  background: var(--accent); color: #fff;
+  font-size: 8px; padding: 1px 4px; border-radius: 3px;
+  font-weight: 600;
+}
+.fs-flags {
+  position: absolute; bottom: 20px; left: 3px;
+  font-size: 8px; color: #d4504a; font-weight: 700;
+  text-shadow: 0 0 3px #000;
+}
+.gps-strip {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 8px; border-bottom: 1px solid var(--border);
+}
+.gps-label { font-size: 9px; color: var(--text-faint); text-transform: uppercase; letter-spacing: .4px; white-space: nowrap; }
+.gps-track { display: flex; gap: 1px; flex: 1; min-width: 0; }
+.gps-seg { flex: 1; height: 6px; background: #4a7d4e; border-radius: 1px; min-width: 2px; }
+.gps-seg.bad { background: #d4504a; }
+.vp-select-overlay { position: absolute; inset: 0; }
+.verdict {
+  display: inline-block; padding: 3px 10px; border-radius: 3px;
+  font-weight: 700; font-size: 11px; margin-bottom: 6px;
+}
+.verdict.go { background: #2d5a2d; color: #a7e2a7; }
+.verdict.partial { background: #5a4a2d; color: #e8d59a; }
+.verdict.nogo { background: #5a2d2d; color: #e2a7a7; }

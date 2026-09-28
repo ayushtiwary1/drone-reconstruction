@@ -55,6 +55,49 @@ export function applyColorMode(geometry: THREE.BufferGeometry, mode: ColorMode):
     return;
   }
 
+  if (mode === 'confidence') {
+    // Per-vertex confidence field computed by features/provenance (0..1).
+    const conf = geometry.userData.confidence as Float32Array | undefined;
+    const colors = new Float32Array(pos.count * 3);
+    for (let i = 0; i < pos.count; i++) {
+      const c = conf ? conf[i] : 0.5;
+      // red → amber → green ramp
+      const r = c < 0.5 ? 1 : 1 - (c - 0.5) * 2;
+      const g = c < 0.5 ? c * 1.7 : 0.85;
+      colors[i * 3] = r;
+      colors[i * 3 + 1] = g;
+      colors[i * 3 + 2] = 0.15;
+    }
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    return;
+  }
+
+  if (mode === 'hillshade') {
+    // Multi-direction hillshade: compute vertex normals, blend three lights.
+    geometry.computeVertexNormals();
+    const nrm = geometry.getAttribute('normal') as THREE.BufferAttribute | undefined;
+    const colors = new Float32Array(pos.count * 3);
+    const lights = [
+      new THREE.Vector3(-0.6, 0.8, -0.4).normalize(),
+      new THREE.Vector3(0.7, 0.6, 0.4).normalize(),
+      new THREE.Vector3(0, 1, 0.9).normalize(),
+    ];
+    if (nrm) {
+      const v = new THREE.Vector3();
+      for (let i = 0; i < pos.count; i++) {
+        v.fromBufferAttribute(nrm, i);
+        let lum = 0;
+        for (const L of lights) lum += Math.max(0, v.dot(L)) / lights.length;
+        const t = 0.25 + lum * 0.85;
+        colors[i * 3] = t;
+        colors[i * 3 + 1] = t;
+        colors[i * 3 + 2] = t * 1.02;
+      }
+    }
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    return;
+  }
+
   // Elevation ramp over the local Y range.
   let minY = Infinity;
   let maxY = -Infinity;

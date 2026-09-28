@@ -13,7 +13,7 @@ import { Panel, Section, field } from '../ui/Panel.ts';
 import { Segmented } from '../ui/Segmented.ts';
 import { Dropdown } from '../ui/Dropdown.ts';
 import { Slider } from '../ui/Slider.ts';
-import { EXPORT_FILES, exportFileSize, formatBytes } from '../pipeline/backend.ts';
+import { EXPORT_FILES, exportFileSize, exportUrl, formatBytes } from '../pipeline/backend.ts';
 import { measureStats } from '../viewer/measure.ts';
 
 const PROFILE_CELL: Record<HardwareProfile, string> = {
@@ -28,6 +28,8 @@ export class InspectorPanel {
   private measurementsBody: HTMLDivElement;
   private georefBody: HTMLDivElement;
   private exportsBody: HTMLDivElement;
+  private captureBody!: HTMLDivElement;
+  private limitsBody!: HTMLDivElement;
 
   constructor() {
     this.panel = new Panel('Inspector', 'panel-right');
@@ -95,12 +97,33 @@ export class InspectorPanel {
       [
         { value: 'rgb', label: 'RGB (camera colour)' },
         { value: 'elevation', label: 'Elevation (height ramp)' },
+        { value: 'confidence', label: 'Confidence (view/distance/holes)' },
+        { value: 'hillshade', label: 'Hillshade (multi-light)' },
       ],
       store.get('colorMode')
     );
-    colorDrop.onChange((v) => store.set('colorMode', v as 'rgb' | 'elevation'));
+    colorDrop.onChange((v) => store.set('colorMode', v as 'rgb' | 'elevation' | 'confidence' | 'hillshade'));
     store.on('colorMode', (v) => colorDrop.setValue(v));
     display.body.appendChild(field('Colour mode', colorDrop.el));
+
+    const unobsRow = el('div');
+    unobsRow.style.display = 'flex';
+    unobsRow.style.alignItems = 'center';
+    unobsRow.style.justifyContent = 'space-between';
+    unobsRow.appendChild(el('span', 'field-label', 'Hide unobserved (hole-filled)'));
+    const unobsToggle = el('button', 'toggle');
+    unobsToggle.setAttribute('role', 'switch');
+    unobsToggle.addEventListener('click', () => {
+      store.set('hideUnobserved', !store.get('hideUnobserved'));
+    });
+    store.on('hideUnobserved', (on) => unobsToggle.classList.toggle('on', on));
+    unobsRow.appendChild(unobsToggle);
+    display.body.appendChild(unobsRow);
+
+    const exagSlider = new Slider(1, 5, 0.25, store.get('reliefExag'), '×');
+    exagSlider.onChange((v) => store.set('reliefExag', v));
+    store.on('reliefExag', (v) => exagSlider.setValue(v));
+    display.body.appendChild(field('Relief exaggeration', exagSlider.el));
 
     const gridRow = el('div');
     gridRow.style.display = 'flex';
@@ -142,6 +165,21 @@ export class InspectorPanel {
     );
     this.panel.body.appendChild(measSection.el);
     store.on('measurements', () => this.renderMeasurements());
+
+    /* ── Capture Report (T10) ──────────────────────────── */
+    const capSection = new Section('Capture Report');
+    this.captureBody = el('div');
+    this.captureBody.appendChild(el('div', 'footnote', 'Run a reconstruction to see the GO / NO-GO verdict.'));
+    capSection.body.appendChild(this.captureBody);
+    this.panel.body.appendChild(capSection.el);
+    store.on('captureReport', () => this.renderCapture());
+
+    /* ── Accuracy & Limits (T15) ───────────────────────── */
+    const accSection = new Section('Accuracy & Limits');
+    this.limitsBody = el('div');
+    this.limitsBody.appendChild(el('div', 'footnote', 'Mode: Rapid 2.5D heightmap — not validated with GCPs.'));
+    accSection.body.appendChild(this.limitsBody);
+    this.panel.body.appendChild(accSection.el);
 
     /* ── Scene Info ────────────────────────────────────── */
     const infoSection = new Section('Scene Info');
@@ -230,6 +268,68 @@ export class InspectorPanel {
     this.georefBody.appendChild(table);
   }
 
+  /* ── capture report (T10) ────────────────────────────── */
+
+  private renderCapture(): void {
+    const r = store.get('captureReport');
+    this.captureBody.innerHTML = '';
+    if (!r) {
+      this.captureBody.appendChild(el('div', 'footnote', 'Run a reconstruction to see the GO / NO-GO verdict.'));
+      return;
+    }
+    const verdict = String(r.verdict ?? '—');
+    const chip = el('div', `verdict ${verdict === 'GO' ? 'go' : verdict === 'PARTIAL' ? 'partial' : 'nogo'}`, verdict);
+    this.captureBody.appendChild(chip);
+    const table = el('table', 'table kv-table');
+    const tbody = el('tbody');
+    table.appendChild(tbody);
+    const rows: [string, string][] = [
+      ['Frames', String(r.frames ?? '—')],
+      ['Blurry frames', `${Number(r.blur_pct ?? 0).toFixed(0)} %`],
+      ['Overexposed', `${Number(r.overexposed_pct ?? 0).toFixed(0)} %`],
+      ['GPS gaps', String(r.gps_gaps ?? 0)],
+      ['GPS/VO disagreements', String(r.gps_disagree_frames ?? 0)],
+      ['Sync offset (est.)', `${Number(r.sync_offset_sec ?? 0).toFixed(1)} s`],
+      ['Sync confidence', `r=${Number(r.sync_confidence ?? 0).toFixed(2)}`],
+      ['Flight type', String(r.flight_type ?? '—')],
+    ];
+    for (const [k, v] of rows) {
+      const tr = el('tr');
+      tr.appendChild(el('td', undefined, k));
+      tr.appendChild(el('td', undefined, v));
+      tbody.appendChild(tr);
+    }
+    this.captureBody.appendChild(table);
+  }
+
+  /* ── accuracy & limits (T15) ─────────────────────────── */
+
+  updateLimits(o: { holePct: number; syncOff: number | null; syncConf: number | null; gpsIntegrity: string }): void {
+    this.limitsBody.innerHTML = '';
+    const table = el('table', 'table kv-table');
+    const tbody = el('tbody');
+    table.appendChild(tbody);
+    const rows: [string, string][] = [
+      ['Mode', 'Rapid 2.5D (heightmap — no facades)'],
+      ['GPS integrity', o.gpsIntegrity],
+      ['Hole-filled verts', `${o.holePct.toFixed(1)} %`],
+      ['Sync offset', o.syncOff !== null ? `${o.syncOff.toFixed(1)} s (r=${(o.syncConf ?? 0).toFixed(2)})` : '—'],
+      ['Absolute accuracy', 'GPS-limited (no GCPs)'],
+      ['Vertical', 'Depth-model relative relief ± noise'],
+    ];
+    for (const [k, v] of rows) {
+      const tr = el('tr');
+      tr.appendChild(el('td', undefined, k));
+      tr.appendChild(el('td', undefined, v));
+      tbody.appendChild(tr);
+    }
+    this.limitsBody.appendChild(table);
+    this.limitsBody.appendChild(
+      el('div', 'footnote',
+        'Honest limits: 2.5D only (no building facades/undersides), absolute position is GPS-limited, no GCP validation. Confidence = views + camera distance + local smoothness.')
+    );
+  }
+
   /* ── exports list ────────────────────────────────────── */
 
   renderExports(_mode: string | null): void {
@@ -243,7 +343,7 @@ export class InspectorPanel {
       const sizeEl = el('span', 'fmt-size', '—');
       row.appendChild(sizeEl);
       const a = el('a', 'btn-icon') as HTMLAnchorElement;
-      a.href = f.file;
+      a.href = exportUrl(f.file);
       a.download = f.file.split('/').pop() ?? f.label;
       a.appendChild(icon('download', 14));
       a.setAttribute('data-tooltip', `Download ${f.label}`);

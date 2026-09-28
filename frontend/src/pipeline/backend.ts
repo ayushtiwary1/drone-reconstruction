@@ -16,16 +16,32 @@ export interface RunArgs {
   telemetryPath: string;
   hardwareProfile: HardwareProfile;
   cameraPitchDeg: number;
+  frameRange?: [number, number] | null;
+  excludedFrames?: number[] | null;
 }
+
+/** Artifact kinds emitted by the backend as `pipeline-artifact` events. */
+export type ArtifactKind =
+  | 'ply' | 'obj' | 'las' | 'glb' | 'georef'
+  | 'frames_bin' | 'views_bin' | 'cameras' | 'frames_dir' | 'capture_report';
+
+export interface ArtifactPayload { kind: string; path: string; count?: number }
 
 export interface Backend {
   readonly isMock: boolean;
   pickFile(kind: 'video' | 'telemetry'): Promise<FileInput | null>;
   runReconstruction(args: RunArgs): Promise<string>;
   onPipelineLog(cb: (msg: string) => void): void;
+  onArtifact(cb: (a: ArtifactPayload) => void): void;
   onFileDrop(cb: (paths: string[], x: number, y: number) => void): void;
   /** URL the viewer should load after a successful run. */
   modelUrl(): Promise<string>;
+  /** Absolute-path artifacts → asset-protocol URL (Tauri) or local path (mock). */
+  artifactUrl(path: string): string;
+  /** Absolute path of the artifact of the given kind from the latest run. */
+  artifactPath(kind: ArtifactKind): string | null;
+  /** frames_dir count (thumbnails) from the latest run. */
+  framesCount(): number;
   quit(): void;
 }
 
@@ -51,6 +67,24 @@ function fileName(path: string): string {
 /* ── Real Tauri backend ─────────────────────────────────── */
 
 function createTauriBackend(): Backend {
+  const artifacts = new Map<string, string>();
+  let framesCnt = 0;
+  let artifactCb: ((a: ArtifactPayload) => void) | null = null;
+  let cfs: ((p: string) => string) | null = null;
+  import('@tauri-apps/api/core')
+    .then((m) => { cfs = m.convertFileSrc; })
+    .catch(() => { /* noop */ });
+  // subscribe eagerly so early artifacts are captured
+  import('@tauri-apps/api/event')
+    .then(({ listen }) =>
+      listen<ArtifactPayload>('pipeline-artifact', (e) => {
+        artifacts.set(e.payload.kind, e.payload.path);
+        if (e.payload.kind === 'frames_dir') framesCnt = e.payload.count ?? 0;
+        artifactCb?.(e.payload);
+      })
+    )
+    .catch((err) => console.error('[backend] artifact listener failed', err));
+
   return {
     isMock: false,
 
@@ -72,6 +106,8 @@ function createTauriBackend(): Backend {
         telemetryPath: args.telemetryPath,
         hardwareProfile: args.hardwareProfile,
         cameraPitchDeg: args.cameraPitchDeg,
+        frameRange: args.frameRange ?? null,
+        excludedFrames: args.excludedFrames ?? null,
       });
     },
 
@@ -93,7 +129,29 @@ function createTauriBackend(): Backend {
         .catch((err) => console.error('[backend] drag-drop listener failed', err));
     },
 
+    onArtifact(cb) {
+      artifactCb = cb;
+    },
+
+    artifactUrl(path: string) {
+      const url = cfs ? cfs(path) : path;
+      return `${url}${url.includes('?') ? '&' : '?'}v=${Date.now()}`;
+    },
+
+    artifactPath(kind: ArtifactKind): string | null {
+      return artifacts.get(kind) ?? null;
+    },
+
+    framesCount(): number {
+      return framesCnt;
+    },
+
     async modelUrl() {
+      const ply = artifacts.get('ply');
+      if (ply) {
+        const { convertFileSrc } = await import('@tauri-apps/api/core');
+        return convertFileSrc(ply) + `?v=${Date.now()}`;
+      }
       // Bust cache so Vite serves the freshly written PLY.
       return `${MODEL_PATH}?v=${Date.now()}`;
     },
@@ -181,6 +239,22 @@ function createMockBackend(): Backend {
       logCb = cb;
     },
 
+    onArtifact() {
+      /* mock run emits no artifacts */
+    },
+
+    artifactUrl(path: string) {
+      return `${path}?v=${Date.now()}`;
+    },
+
+    artifactPath() {
+      return null;
+    },
+
+    framesCount() {
+      return 0;
+    },
+
     onFileDrop() {
       /* Browser drops are handled by the dropzone DOM fallback. */
     },
@@ -210,13 +284,24 @@ export const backend: Backend = isTauri && !FORCE_MOCK ? createTauriBackend() : 
 /** Fetch sizes of export artifacts via HEAD; null when unavailable. */
 export async function exportFileSize(file: string): Promise<number | null> {
   try {
-    const res = await fetch(`${file}?v=${Date.now()}`, { method: 'HEAD' });
+    // `file` is the legacy '/recon_output.x' path — map to the real artifact
+    const kind = file.replace('/recon_output.', '').replace('/recon_georeference.json', 'georef');
+    const p = backend.artifactPath(kind as ArtifactKind);
+    const url = p ? backend.artifactUrl(p) : `${file}?v=${Date.now()}`;
+    const res = await fetch(url, { method: 'HEAD' });
     if (!res.ok) return null;
     const len = res.headers.get('content-length');
     return len ? parseInt(len, 10) : null;
   } catch {
     return null;
   }
+}
+
+/** Download URL for an export file (prefers the app-data artifact path). */
+export function exportUrl(file: string): string {
+  const kind = file.replace('/recon_output.', '').replace('/recon_georeference.json', 'georef');
+  const p = backend.artifactPath(kind as ArtifactKind);
+  return p ? backend.artifactUrl(p) : `${file}?v=${Date.now()}`;
 }
 
 export function formatBytes(bytes: number | null): string {
