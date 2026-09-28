@@ -242,6 +242,7 @@ export class Viewer {
     }
 
     applyColorMode(this.geometry, this.colorMode);
+    this.geometry.userData.baseTint = new Float32Array(this.geometry.getAttribute('color').array as Float32Array);
     this.afterColor?.();
     const wantMesh = this.mode === 'mesh' && Boolean(this.geometry.index);
     if (wantMesh) {

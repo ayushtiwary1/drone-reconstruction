@@ -38,7 +38,13 @@ function ensureOriginalColors(geometry: THREE.BufferGeometry): void {
   if (geometry.userData[ORIGINAL_COLORS]) return;
   const col = geometry.getAttribute('color') as THREE.BufferAttribute | undefined;
   if (!col) return;
-  geometry.userData[ORIGINAL_COLORS] = new Float32Array(col.array as ArrayLike<number>);
+  const rgb = new Float32Array(col.count * 3);
+  for (let i = 0; i < col.count; i++) {
+    rgb[3 * i] = col.getX(i);
+    rgb[3 * i + 1] = col.getY(i);
+    rgb[3 * i + 2] = col.getZ(i);
+  }
+  geometry.userData[ORIGINAL_COLORS] = rgb;
 }
 
 export function applyColorMode(geometry: THREE.BufferGeometry, mode: ColorMode): void {

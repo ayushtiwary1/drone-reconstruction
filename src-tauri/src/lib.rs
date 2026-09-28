@@ -1444,6 +1444,10 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
     let mut cam_positions: Vec<serde_json::Value> = Vec::new();
     let mut frame_quality: Vec<(u32, f32, f32)> = Vec::new(); // (idx, sharpness, clip_frac)
     let mut gnss_flags: Vec<bool> = Vec::new();
+    let debug = std::env::var("RECON_DEBUG").as_deref() == Ok("1");
+    let mut debug_frames: Vec<serde_json::Value> = Vec::new();
+    let mut debug_cells: std::collections::HashMap<SurfaceKey, (u16, f32, usize)> = std::collections::HashMap::new();
+    let mut overlap_diffs: Vec<f32> = Vec::new();
     let excluded_set: std::collections::HashSet<u32> =
         excluded_frames.unwrap_or_default().into_iter().collect();
 
@@ -1625,6 +1629,24 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
         ];
 
         let cam_c = [cur_world_x, h_agl, -cur_world_z];
+        if debug {
+            let n = depth_raw.len() as f64;
+            let mean = depth_raw.iter().map(|v| *v as f64).sum::<f64>() / n;
+            let std = (depth_raw.iter().map(|v| (*v as f64 - mean).powi(2)).sum::<f64>() / n).sqrt();
+            let gps = fp_opt.as_ref().map(|p| {
+                let origin = &telemetry[0];
+                let r = 6_378_137.0_f64;
+                [((p.longitude - origin.longitude) * origin.latitude.to_radians().cos() * r * std::f64::consts::PI / 180.0) as f32,
+                 p.altitude_m,
+                 (-((p.latitude - origin.latitude) * r * std::f64::consts::PI / 180.0)) as f32]
+            });
+            debug_frames.push(serde_json::json!({
+                "frame":frame_idx,"depth":{"min":depth_raw.iter().copied().fold(f32::INFINITY,f32::min),
+                    "max":depth_raw.iter().copied().fold(f32::NEG_INFINITY,f32::max),"std":std,
+                    "p5":raw_p5,"p95":raw_p95},"pose":{"t":cam_c,"ypr":[yaw_deg,eff_pitch_deg,roll_rad]},
+                "gps_enu":gps,"telemetry_available":fp_opt.is_some()
+            }));
+        }
         // footprint: 4 image-corner rays cast to ground plane (y=0)
         let corners: [[f32; 2]; 4] = [
             [(0.0 - cx) / fx, (active_y_start as f32 - cy) / fy],
@@ -1660,6 +1682,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
         frame_quality.push((frame_idx as u32, sharpness, clip_frac));
         gnss_flags.push(gps_ok_frame);
 
+        let mut frame_cells: std::collections::HashMap<SurfaceKey, (f32, usize)> = std::collections::HashMap::new();
         // Back-projection loop across every pixel
         for y in active_y_start..active_y_end {
             let y_f = y as f32;
@@ -1718,6 +1741,11 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
 
                 // Surface fusion
                 let key = surface_key(ply_x, ply_z, cell_size);
+                if debug {
+                    let entry = frame_cells.entry(key).or_insert((0.0, 0));
+                    entry.0 += ply_y;
+                    entry.1 += 1;
+                }
                 let w = (1.0 - (t / 150.0).clamp(0.0, 0.9)).max(0.1);
 
                 match surface_grid.get_mut(&key) {
@@ -1761,6 +1789,14 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
             }
         }
 
+        if debug {
+            for (key, (sum, n)) in frame_cells {
+                let height = sum / n as f32;
+                if let Some((_, prev, _)) = debug_cells.insert(key, (frame_idx as u16, height, n)) {
+                    overlap_diffs.push((prev - height).abs());
+                }
+            }
+        }
         let _ = app.emit(
             "pipeline-log",
             format!(
@@ -1979,6 +2015,44 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
             serde_json::json!({"kind": kind, "path": path.to_string_lossy()}),
         );
     };
+
+    if debug && !mesh_vertices.is_empty() {
+        let n = mesh_vertices.len() as f64;
+        let mut sum = [0.0f64; 3];
+        let mut sq = [0.0f64; 3];
+        let mut min = [255.0f32; 3];
+        let mut max = [0.0f32; 3];
+        let mut sat = 0usize;
+        let mut heights = Vec::with_capacity(mesh_vertices.len());
+        for p in &mesh_vertices {
+            heights.push(p.y);
+            let rgb = [p.r, p.g, p.b];
+            if rgb.iter().any(|v| *v >= 250.0) { sat += 1; }
+            for c in 0..3 {
+                sum[c] += rgb[c] as f64;
+                sq[c] += (rgb[c] as f64).powi(2);
+                min[c] = min[c].min(rgb[c]);
+                max[c] = max[c].max(rgb[c]);
+            }
+        }
+        heights.sort_by(|a, b| a.total_cmp(b));
+        overlap_diffs.sort_by(|a, b| a.total_cmp(b));
+        let pct = |a: &Vec<f32>, p: f32| a[((a.len() - 1) as f32 * p).round() as usize];
+        let dbg = serde_json::json!({
+            "frames":debug_frames,
+            "cloud":{"n":mesh_vertices.len(),"colour_dtype":"uchar RGB (PLY); Three.js Uint8 normalized",
+                "colour_min":min,"colour_max":max,
+                "colour_mean":sum.map(|v| v / n),
+                "colour_std":sq.iter().enumerate().map(|(i,v)| (v / n - (sum[i]/n).powi(2)).max(0.0).sqrt()).collect::<Vec<_>>(),
+                "saturated_pct":sat as f64 * 100.0 / n,
+                "height":{"min":heights[0],"p5":pct(&heights,0.05),"p95":pct(&heights,0.95),"max":heights[heights.len()-1]},
+                "up_axis":"Y"},
+            "overlap":{"n":overlap_diffs.len(),"median_abs_height_m":if overlap_diffs.is_empty(){None}else{Some(pct(&overlap_diffs,0.5))}},
+            "output_dir":out_dir,
+        });
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../eval/debug.json");
+        fs::write(path, serde_json::to_vec_pretty(&dbg).unwrap()).map_err(|e| format!("[DEBUG] write: {e}"))?;
+    }
 
     // 7A. Binary PLY Export (with element face)
     write_ply(&ply_path, &mesh_vertices, &faces)?;
