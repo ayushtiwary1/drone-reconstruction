@@ -30,7 +30,7 @@ CI if any output ever loses colour.
 | H2 | Colour sampled from ImageNet-normalised tensor | **RULED OUT** | `raw_rgb` is the u8 RGB buffer; `chw` is never used for colour (lib.rs projection loop reads `raw_rgb[p_idx]`); commit history shows same code |
 | H3 | u8 overflow/saturation in running average / hole fill | **RULED OUT** | `r,g,b` are f32 accumulators, weighted-mean in f64 domain, `.round().clamp(0,255)` at write; math verified in code + output stats |
 | H4 | RGB/BGR swap, stride, or letterbox-offset error | **RULED OUT** | RGB JPEG → `to_rgb8()` → `raw_rgb` interleaved R,G,B → written as red,green,blue; letterbox rows excluded from the projection loop (`active_y_start..active_y_end`); render shows correct savanna hues |
-| H5 | PLYLoader property-name/type mismatch | **RULED OUT** | three@0.186 PLYLoader verified in node: `color` Float32 attr (÷255), itemSize 3, index 2.71M; `vertexColors:true` set in both render paths |
+| H5 | PLYLoader property-name/type mismatch | **RULED OUT for PLY; later UI regression found** | Three@0.186 reads `uchar red/green/blue` as a **normalized Uint8BufferAttribute**; `getX/Y/Z()` returns linear 0–1. The redesigned UI erroneously copied the underlying raw Uint8 array (0–255) into a non-normalized Float32 attribute, causing white clipping. See update below. |
 | H6 | Stale / wrong file served | **CONFIRMED DEFECT (fixed)** | Outputs were written CWD-relative to `frontend/public/`, but `frontendDist` is `frontend/dist` — in packaged builds the webview serves the file baked at build time, never the new run; in dev it serves whatever previous run left. A stale colourless artifact would be shown as if fresh. Fix: outputs now go to a per-run dir under app-data (`$APPDATA/recon/runs/<ts>`), `pipeline-artifact` events carry absolute paths, viewer loads via `convertFileSrc` (asset protocol scoped to `$APPDATA`/`$TEMP`) |
 | H7 | Bad frames (overexposed/decode) | **RULED OUT** | Extracted JPEGs inspected — well-exposed savanna (zebras, giraffe visible); identical bytes with and without `-hwaccel cuda` |
 
@@ -73,3 +73,23 @@ explains it: the bundled `recon_output.*` from a months-old run is what the
 viewer always loaded. That path is now eliminated, not patched over — the
 viewer only ever loads the absolute path of the artifact the current run just
 wrote.
+
+## 2026-09-29 update — regression in `features-all`
+
+The reported white screenshot is reproducible with the redesigned UI. Byte-level
+PLY from the same 30 s clip has **0.0% saturated vertices**; its RGB means are
+113.6/94.9/81.0 out of 255 with σ 37.5/26.1/23.0. Three@0.186 parses uchar
+colour as normalized `Uint8BufferAttribute` and converts sRGB to linear. The
+new `colorModes.ensureOriginalColors()` copied `.array` into Float32 **without
+normalization**; after `rgb` mode `vertexColors` received values up to 138,
+clipped to white. Fixed by reading `getX/getY/getZ` before creating Float32
+colour attributes; `Viewer.renderModel()` now refreshes the tint baseline when
+switching colour modes. No export or material hacks.
+
+Evidence: `eval/debug.json` (baseline in commit `9eef975`),
+`eval/debug_after.json`, `eval/evidence_colour.png`. After: **0% saturated**
+raw PLY, σ sRGB ≈ 0.147/0.102/0.090; the image shows coloured terrain. The
+full-frame source mean includes sky which is intentionally excluded from the
+3D surface; comparison with source **ground ROI** differs by 0.018/0.037/0.050
+per channel, while full-frame blue differs by 0.156 (literal C1 mean test fails
+for sky-inclusive frames).

@@ -1,0 +1,42 @@
+<!doctype html><html><head><meta charset="utf-8"><style>body{margin:0;background:#1a1a1a}canvas{display:block}#caption{position:absolute;left:18px;top:12px;padding:8px;background:#232323;color:#ddd;font:14px monospace}</style><script type="importmap">{"imports":{"three":"/frontend/node_modules/three/build/three.module.js"}}</script></head><body><canvas id="c"></canvas><div id="caption"></div><script type="module">
+import * as THREE from 'three';
+import { PLYLoader } from '/frontend/node_modules/three/examples/jsm/loaders/PLYLoader.js';
+const mode = new URLSearchParams(location.search).get('mode') ?? 'colour';
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setSize(1280, 800);
+const scene = new THREE.Scene(); scene.background = new THREE.Color('#1a1a1a');
+const camera = new THREE.PerspectiveCamera(55, 1280 / 800, .1, 10000);
+const light = new THREE.GridHelper(400, 40, '#4a4a4a', '#2c2c2c'); scene.add(light);
+const url = '/runs/fix_connected/recon_output.ply';
+new PLYLoader().load(url, async (g) => {
+  g.computeBoundingBox(); const bb = g.boundingBox; const center = bb.getCenter(new THREE.Vector3());
+  const t = new THREE.Vector3(-center.x, -bb.min.y, -center.z); g.translate(t.x,t.y,t.z); g.computeBoundingBox();
+  const pos = g.getAttribute('position'), col = g.getAttribute('color');
+  const raw = new Float32Array(col.count * 3);
+  for(let i=0;i<col.count;i++){raw[3*i]=col.getX(i);raw[3*i+1]=col.getY(i);raw[3*i+2]=col.getZ(i)}
+  const colors = new Float32Array(raw);
+  const heights = []; for(let i=0;i<pos.count;i++) heights.push(pos.getY(i)); heights.sort((a,b)=>a-b);
+  const level = heights[Math.floor((heights.length-1)*.1)];
+  if(mode==='relief') {
+    for(let i=0;i<pos.count;i++){const v=(pos.getY(i)-heights[0])/(heights.at(-1)-heights[0]);colors[3*i]=v;colors[3*i+1]=.3+v*.5;colors[3*i+2]=1-v;}
+  }
+  if(mode==='flood') {
+    const water = new THREE.Color('#2d6fec');
+    for(let i=0;i<pos.count;i++){const d=level-pos.getY(i);if(d<=0)continue;const f=.35+.5*Math.min(d/2,1);for(let k=0;k<3;k++)colors[3*i+k]=raw[3*i+k]*(1-f)+water.toArray()[k]*f;}
+    const b=g.boundingBox;
+    const plane = new THREE.Mesh(new THREE.PlaneGeometry(b.max.x-b.min.x,b.max.z-b.min.z),new THREE.MeshBasicMaterial({color:water,opacity:.4,transparent:true,depthWrite:false,side:THREE.DoubleSide}));
+    plane.rotation.x=-Math.PI/2;plane.position.set((b.max.x+b.min.x)/2,level,(b.max.z+b.min.z)/2);scene.add(plane);
+  }
+  g.setAttribute('color',new THREE.BufferAttribute(colors,3));
+  const mesh = new THREE.Mesh(g,new THREE.MeshBasicMaterial({vertexColors:true,side:THREE.DoubleSide})); scene.add(mesh);
+  if(mode==='registration') {
+    const cams=await(await fetch('/runs/fix_connected/recon_cameras.json')).json();
+    const markerG = new THREE.SphereGeometry(1.8,8,8), markerM=new THREE.MeshBasicMaterial({color:'#f5aa5c'});
+    for(const c of cams){const m=new THREE.Mesh(markerG,markerM);m.position.set(c.cam[0]+t.x,c.cam[1]+t.y,c.cam[2]+t.z);scene.add(m)}
+  }
+  camera.position.set(0,160,215);camera.lookAt(0,8,0);
+  document.getElementById('caption').textContent=`${mode.toUpperCase()} · ${pos.count.toLocaleString()} vertices · Rapid 2.5D · real DJI_0212_trimmed output`;
+  renderer.render(scene,camera);document.title='RENDERED';
+},undefined,(e)=>{console.error(e);document.title='ERROR'});
+</script></body></html>

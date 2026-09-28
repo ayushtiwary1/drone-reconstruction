@@ -24,6 +24,7 @@ export class Slider {
     this.range.value = String(initial);
     this.num = el('input', 'input') as HTMLInputElement;
     this.num.type = 'number';
+    this.num.title = this.suffix;
     this.num.min = String(min);
     this.num.max = String(max);
     this.num.step = String(step);
@@ -49,8 +50,8 @@ export class Slider {
   }
 
   private fmt(v: number): string {
-    const decimals = this.step < 1 ? 1 : 0;
-    return v.toFixed(decimals) + this.suffix;
+    const decimals = this.step < 0.1 ? 2 : this.step < 1 ? 1 : 0;
+    return v.toFixed(decimals);
   }
 
   getValue(): number {

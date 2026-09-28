@@ -12,6 +12,7 @@
   },
   "mesh_connected_components": 1,
   "source_mean_ground_roi_srgb": [0.46276977, 0.40913551, 0.36802018],
+  "source_mean_full_frame_srgb": [0.50176821, 0.48601851, 0.47443314],
   "cloud": {
     "colour_dtype": "uchar RGB (PLY); Three.js Uint8 normalized",
     "colour_max": [
