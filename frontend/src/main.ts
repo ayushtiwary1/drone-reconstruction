@@ -14,6 +14,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { listen, type Event } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
+import { SelectionDemo } from './features/selection';
 
 // ─────────────────────────────────────────────────────────────
 // Type Definitions
@@ -41,6 +42,9 @@ const pointSizeSlider = document.getElementById('pointSizeSlider') as HTMLInputE
 const pointSizeVal = document.getElementById('pointSizeVal') as HTMLSpanElement | null;
 let currentPointSize = 2.0;
 let currentGeometry: THREE.BufferGeometry | null = null;
+// [demo] translation applied to the loaded geometry (PLY→scene)
+const geomTranslate = new THREE.Vector3();
+let selection: SelectionDemo | null = null;
 
 if (pointSizeSlider) {
     pointSizeSlider.addEventListener('input', () => {
@@ -205,6 +209,7 @@ function loadPointCloud(url: string): Promise<void> {
                 // Translate so bounding box centre is at world origin (XZ),
                 // with the minimum Y resting on the grid plane (Y=0).
                 geometry.translate(-center.x, -bbox.min.y, -center.z);
+                geomTranslate.set(-center.x, -bbox.min.y, -center.z);
                 currentGeometry = geometry;
 
                 renderGeometry(geometry);
@@ -257,6 +262,11 @@ appendLog('[SYS] Ready. Select video and telemetry, then click START RECONSTRUCT
 let frameTotal = 0;
 let framesDone = 0;
 let lastPlyPath = '';
+// [demo] artifact paths for the current run
+let lastFramesBin = '';
+let lastCamerasJson = '';
+let lastFramesDir = '';
+let lastFramesCount = 0;
 
 const EXPORT_IDS: Record<string, string> = {
     ply: 'downloadPly',
@@ -265,9 +275,12 @@ const EXPORT_IDS: Record<string, string> = {
     glb: 'downloadGlb',
 };
 
-listen<{ kind: string; path: string }>('pipeline-artifact', (e) => {
+listen<{ kind: string; path: string; count?: number }>('pipeline-artifact', (e) => {
     const { kind, path } = e.payload;
     if (kind === 'ply') lastPlyPath = path;
+    if (kind === 'frames_bin') lastFramesBin = path;
+    if (kind === 'cameras') lastCamerasJson = path;
+    if (kind === 'frames_dir') { lastFramesDir = path; lastFramesCount = e.payload.count ?? 0; }
     const id = EXPORT_IDS[kind];
     const a = id ? (document.getElementById(id) as HTMLAnchorElement | null) : null;
     if (a) {
@@ -352,18 +365,13 @@ telemetryFileBtn.addEventListener('click', async (e: MouseEvent) => {
 // Reconstruction — Run Button
 // ─────────────────────────────────────────────────────────────
 
-runBtn.addEventListener('click', async () => {
-    if (!selectedVideoPath) {
-        appendLog('<span style="color:#ef4444;">[ERROR] Select a video payload before starting.</span>');
-        return;
-    }
-
+async function runPipeline(frameRange: [number, number] | null): Promise<void> {
     const profile = profileSelect.value as HardwareProfile;
     runBtn.disabled = true;
     progressBar.value = 0;
     progressBar.max = 100;
 
-    appendLog(`[INFO] Starting reconstruction — profile: <strong>${profile}</strong>`);
+    appendLog(`[INFO] Starting reconstruction — profile: <strong>${profile}</strong>${frameRange ? ` — frames ${frameRange[0]}–${frameRange[1]}` : ''}`);
 
     try {
         // "auto" → send null → backend uses telemetry gimbal pitch (fallback −45°)
@@ -373,18 +381,41 @@ runBtn.addEventListener('click', async () => {
         const syncOffsetSec = syncInput && syncInput.value.trim() !== ''
             ? parseFloat(syncInput.value)
             : null;
+        const t0 = performance.now();
         await invoke<string>('run_reconstruction', {
             videoPath: selectedVideoPath,
             telemetryPath: selectedCsvPath,
             hardwareProfile: profile,         // ← wired to Rust HardwareProfile enum
             cameraPitchDeg: cameraPitch,
             syncOffsetSec,
+            frameRange,
         });
+        const secs = (performance.now() - t0) / 1000;
 
         // Load the artifact written to the app-data run dir (never a bundled
         // stale file — convertFileSrc reads the absolute path on disk).
         if (lastPlyPath) {
             await loadPointCloud(convertFileSrc(lastPlyPath));
+            // [demo] wire up selection artifacts (frames.bin, cameras, thumbs)
+            if (!selection) {
+                selection = new SelectionDemo({
+                    scene, camera, canvas, controls,
+                    appendLog,
+                    getGeometry: () => currentGeometry,
+                    reloadArtifacts: () => Promise.resolve(),
+                });
+                const rb = document.getElementById('rebuildBtn')!;
+                rb.addEventListener('click', () => {
+                    const r = selection?.getFrameRange();
+                    if (r) runPipeline(r);
+                });
+            }
+            await selection.loadArtifacts(
+                lastFramesBin, lastCamerasJson, lastFramesDir, lastFramesCount,
+                geomTranslate);
+            if (frameRange) {
+                appendLog(`<span style="color:#22d3ee;">[SEL] Rebuilt from frames ${frameRange[0]}–${frameRange[1]} in ${secs.toFixed(1)} s</span>`);
+            }
         } else {
             appendLog('<span style="color:#ef4444;">[FATAL] No PLY artifact reported by backend.</span>');
         }
@@ -395,4 +426,12 @@ runBtn.addEventListener('click', async () => {
     } finally {
         runBtn.disabled = false;
     }
+}
+
+runBtn.addEventListener('click', async () => {
+    if (!selectedVideoPath) {
+        appendLog('<span style="color:#ef4444;">[ERROR] Select a video payload before starting.</span>');
+        return;
+    }
+    await runPipeline(null);
 });

@@ -802,6 +802,10 @@ pub struct SurfacePoint {
     pub g: f32,
     pub b: f32,
     pub weight: f32,
+    /// frame that contributed the single largest weight (65535 = hole-filled)
+    pub frame_id: u16,
+    /// largest single contribution weight seen so far
+    pub best_w: f32,
 }
 
 pub type SurfaceKey = (i32, i32);
@@ -1212,6 +1216,7 @@ async fn run_reconstruction(
     hardware_profile: HardwareProfile,
     camera_pitch_deg: Option<f32>,
     sync_offset_sec: Option<f32>,
+    frame_range: Option<(u32, u32)>,
 ) -> Result<String, String> {
     let pitch = camera_pitch_deg.unwrap_or(-45.0);
     let out_dir = resolve_output_dir(&app);
@@ -1224,6 +1229,7 @@ async fn run_reconstruction(
             pitch,
             out_dir,
             sync_offset_sec,
+            frame_range,
         )
     })
     .await
@@ -1238,6 +1244,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
     camera_pitch_deg: f32,
     out_dir: std::path::PathBuf,
     sync_offset_override: Option<f32>,
+    frame_range: Option<(u32, u32)>,
 ) -> Result<String, String> {
     let wall_clock = Instant::now();
     let _ = app.emit("pipeline-log", "[SYSTEM] Initializing tactical 3D reconstruction pipeline...");
@@ -1424,7 +1431,16 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
     let mut depth_samples = Vec::with_capacity(area);
 
     // ── 5. Per-Frame Inference & Back-Projection Loop ────────
+    // [demo] per-frame camera positions for recon_cameras.json (PLY frame)
+    let mut cam_positions: Vec<(u32, f32, [f32; 3])> = Vec::new();
+
     for (frame_idx, path) in frame_paths.iter().enumerate() {
+        if let Some((a, b)) = frame_range {
+            let i = frame_idx as u32;
+            if i < a || i > b {
+                continue;
+            }
+        }
         let orig = image::open(path)
             .map_err(|e| format!("[IMAGE] Cannot open {:?}: {}", path, e))?;
 
@@ -1561,6 +1577,11 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
         ];
 
         let cam_c = [cur_world_x, h_agl, -cur_world_z];
+        cam_positions.push((
+            frame_idx as u32,
+            frame_idx as f32 + sync_offset + tel_t0,
+            cam_c,
+        ));
 
         // Back-projection loop across every pixel
         for y in active_y_start..active_y_end {
@@ -1632,6 +1653,10 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
                         cell.g = (cell.g * cell.weight + pg * w) / total_w;
                         cell.b = (cell.b * cell.weight + pb * w) / total_w;
                         cell.weight = total_w;
+                        if w > cell.best_w {
+                            cell.best_w = w;
+                            cell.frame_id = frame_idx as u16;
+                        }
                     }
                     None => {
                         surface_grid.insert(
@@ -1644,6 +1669,8 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
                                 g: pg,
                                 b: pb,
                                 weight: w,
+                                frame_id: frame_idx as u16,
+                                best_w: w,
                             },
                         );
                     }
@@ -1781,6 +1808,8 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
                             g: sum_g * inv,
                             b: sum_b * inv,
                             weight: 1.0,
+                            frame_id: u16::MAX,
+                            best_w: 0.0,
                         },
                     ));
                 }
@@ -1868,6 +1897,54 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
 
     // 7A. Binary PLY Export (with element face)
     write_ply(&ply_path, &mesh_vertices, &faces)?;
+
+    // [demo] recon_frames.bin — u16 LE per PLY vertex (same order as write_ply)
+    let frames_bin_path = out_dir.join("recon_frames.bin");
+    {
+        let mut fb = Vec::with_capacity(mesh_vertices.len() * 2);
+        for pt in &mesh_vertices {
+            fb.extend_from_slice(&pt.frame_id.to_le_bytes());
+        }
+        let _ = fs::write(&frames_bin_path, fb);
+        emit_artifact("frames_bin", &frames_bin_path);
+    }
+
+    // [demo] recon_cameras.json — per-frame camera centres (PLY coords)
+    let cams_path = out_dir.join("recon_cameras.json");
+    {
+        let arr: Vec<serde_json::Value> = cam_positions
+            .iter()
+            .map(|(f, t, c)| {
+                serde_json::json!({"frame": f, "time_s": t, "cam": c})
+            })
+            .collect();
+        let _ = fs::write(&cams_path, serde_json::to_string(&arr).unwrap());
+        emit_artifact("cameras", &cams_path);
+    }
+
+    // [demo] downscaled frame thumbnails for the filmstrip (320px wide)
+    let thumbs_dir = out_dir.join("frames");
+    {
+        let _ = fs::create_dir_all(&thumbs_dir);
+        let mut made = 0u32;
+        for (i, path) in frame_paths.iter().enumerate() {
+            if let Ok(img) = image::open(path) {
+                let thumb = img.thumbnail(320, 180);
+                let dst = thumbs_dir.join(format!("frame_{:04}.jpg", i));
+                if thumb.save(&dst).is_ok() {
+                    made += 1;
+                }
+            }
+        }
+        let _ = app.emit(
+            "pipeline-artifact",
+            serde_json::json!({
+                "kind": "frames_dir",
+                "path": thumbs_dir.to_string_lossy(),
+                "count": made,
+            }),
+        );
+    }
 
     // 7B. Wavefront OBJ Export (with real f lines)
     if let Ok(obj_file) = File::create(&obj_path) {
@@ -2566,6 +2643,7 @@ mod tests {
             -45.0,
             out_dir,
             None,
+            None,
         );
         eprintln!("[baseline] elapsed={:?} result={:?}", t0.elapsed(), res);
         assert!(res.is_ok(), "pipeline failed: {:?}", res.err());
@@ -2577,9 +2655,9 @@ mod tests {
         // independent byte-level parse can read back, and must not satisfy the
         // white-model condition (std<10 OR >50% saturated OR >90% r==g==b).
         let verts = vec![
-            SurfacePoint { x: 0.0, y: 0.0, z: 0.0, r: 34.0, g: 120.0, b: 60.0, weight: 1.0 },
-            SurfacePoint { x: 1.0, y: 0.0, z: 0.0, r: 200.0, g: 30.0, b: 40.0, weight: 1.0 },
-            SurfacePoint { x: 0.0, y: 0.0, z: 1.0, r: 90.0, g: 80.0, b: 210.0, weight: 1.0 },
+            SurfacePoint { x: 0.0, y: 0.0, z: 0.0, r: 34.0, g: 120.0, b: 60.0, weight: 1.0, frame_id: 0, best_w: 1.0 },
+            SurfacePoint { x: 1.0, y: 0.0, z: 0.0, r: 200.0, g: 30.0, b: 40.0, weight: 1.0, frame_id: 0, best_w: 1.0 },
+            SurfacePoint { x: 0.0, y: 0.0, z: 1.0, r: 90.0, g: 80.0, b: 210.0, weight: 1.0, frame_id: 0, best_w: 1.0 },
         ];
         let faces = vec![[0u32, 1, 2]];
         let tmp = std::env::temp_dir().join("test_ply_color.ply");
@@ -2609,7 +2687,7 @@ mod tests {
     #[test]
     fn test_ply_white_stats_catches_white() {
         let white = vec![
-            SurfacePoint { x: 0.0, y: 0.0, z: 0.0, r: 255.0, g: 255.0, b: 255.0, weight: 1.0 };
+            SurfacePoint { x: 0.0, y: 0.0, z: 0.0, r: 255.0, g: 255.0, b: 255.0, weight: 1.0, frame_id: 0, best_w: 1.0 };
             10
         ];
         let (std, sat, gray) = ply_white_stats(&white);

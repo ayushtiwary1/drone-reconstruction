@@ -27,6 +27,31 @@
       /* Right 3D Viewport */
       #viewport { flex-grow: 1; position: relative; width: calc(100vw - 340px); height: 100vh; }
       #canvas3d { width: 100%; height: 100%; display: block; }
+
+      /* [demo] lasso overlay */
+      #lassoCanvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5; }
+      #lassoCanvas.active { cursor: crosshair; }
+
+      /* [demo] selection toolbar */
+      #selToolbar { position: absolute; top: 10px; right: 10px; display: flex; gap: 6px; z-index: 8; }
+      #selToolbar button { background: #1f2937; border: 1px solid #374151; color: #cbd5e1; padding: 6px 10px; font-size: 0.72rem; }
+      #selToolbar button:hover { background: #374151; color: #fff; }
+      #selToolbar button.on { border-color: #f59e0b; color: #f59e0b; }
+
+      /* [demo] filmstrip */
+      #filmstrip { position: absolute; left: 0; right: 0; bottom: 0; display: none; gap: 6px; padding: 6px; overflow-x: auto; background: rgba(17,24,39,0.92); border-top: 1px solid #1f2937; z-index: 7; }
+      .fs-cell { position: relative; flex: 0 0 auto; width: 110px; border: 2px solid transparent; border-radius: 4px; overflow: hidden; cursor: pointer; background: #0b0f19; }
+      .fs-cell img { width: 110px; height: 62px; object-fit: cover; display: block; }
+      .fs-label { font-size: 0.6rem; color: #94a3b8; text-align: center; padding: 2px 0; }
+      .fs-badge { position: absolute; top: 2px; right: 2px; background: rgba(2,132,199,0.9); color: #fff; font-size: 0.55rem; padding: 1px 4px; border-radius: 3px; }
+      .fs-cell.sel { border-color: #22d3ee; }
+      .fs-cell.exc { border-color: #ef4444; }
+      .fs-cell.exc img { opacity: 0.35; }
+      .fs-cell.exc::after { content: 'EXC'; position: absolute; top: 2px; left: 2px; color: #ef4444; font-size: 0.55rem; font-weight: bold; }
+
+      /* [demo] toast */
+      #toast { position: absolute; bottom: 110px; left: 50%; transform: translateX(-50%); background: #1f2937; border: 1px solid #22d3ee; color: #e2e8f0; padding: 8px 16px; border-radius: 4px; font-size: 0.75rem; opacity: 0; transition: opacity .25s; pointer-events: none; z-index: 9; }
+      #toast.show { opacity: 1; }
     </style>
   </head>
   <body>
@@ -113,6 +138,16 @@
 
     <div id="viewport">
       <canvas id="canvas3d"></canvas>
+      <canvas id="lassoCanvas"></canvas>
+      <div id="selToolbar">
+        <button id="lassoBtn" title="Draw a region (L)">Lasso (L)</button>
+        <button id="regenBtn" title="Fill excluded-frame points from neighbours">Regen region</button>
+        <button id="rebuildBtn" title="Re-run pipeline on selected frames">Rebuild frames</button>
+        <button id="undoBtn" title="Restore previous buffers">Undo</button>
+        <button id="clearBtn" title="Clear selection (Esc)">Clear</button>
+      </div>
+      <div id="filmstrip"></div>
+      <div id="toast"></div>
     </div>
 
     <script type="module" src="/src/main.ts"></script>
