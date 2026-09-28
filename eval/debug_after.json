@@ -1,4 +1,17 @@
 {
+  "flood_probe": {
+    "up_axis": "Y (scene and PLY; not Z)",
+    "cloud_scene_y_min_p1_p10_p99_max_m": [0.0, 7.564067840576172, 10.887290954589844, 25.498676300048828, 29.146345138549805],
+    "old_slider_level_m": 30,
+    "old_slider_level_above_cloud_max": true,
+    "level_p1": {"wet_vertices_pct": 0.5842981648404076, "area_m2": 358.0730499316359, "volume_m3": 386.1460979053402},
+    "level_p10": {"wet_vertices_pct": 5.843276153527484, "area_m2": 3131.117968435602, "volume_m3": 4824.954898729307},
+    "level_p99": {"wet_vertices_pct": 57.848365202059966, "area_m2": 20001.176135964877, "volume_m3": 201594.07814003504},
+    "plane_extent": "cloud XZ bounds, level in cloud Y bounds",
+    "flood_off_colour_buffer_byte_identical": true
+  },
+  "mesh_connected_components": 1,
+  "source_mean_ground_roi_srgb": [0.46276977, 0.40913551, 0.36802018],
   "cloud": {
     "colour_dtype": "uchar RGB (PLY); Three.js Uint8 normalized",
     "colour_max": [

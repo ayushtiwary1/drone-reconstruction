@@ -20,6 +20,8 @@ export class Analysis {
     private origIndex: THREE.BufferAttribute | null = null;
     private exagApplied = 1;
     private waterMesh: THREE.Mesh | null = null;
+    private floodOriginal: Float32Array | null = null;
+    private floodGeometry: THREE.BufferGeometry | null = null;
     onLog: ((m: string) => void) | null = null;
 
     constructor(viewer: Viewer, prov: Provenance) {
@@ -78,61 +80,98 @@ export class Analysis {
 
     /* ── flood simulation (T11) ───────────────────────────── */
 
-    /** level in scene-Y metres; null clears */
-    setFlood(level: number | null): { area: number; isolated: number } | null {
+    heightRange(): { min: number; p1: number; p10: number; p99: number; max: number } | null {
         const g = this.viewer.getGeometry();
-        if (!g || !this.prov.frameIds) return null;
-        // clear previous
+        const ids = this.prov.frameIds;
+        if (!g || !ids) return null;
+        const pos = g.getAttribute('position') as THREE.BufferAttribute;
+        const heights: number[] = [];
+        for (let i = 0; i < pos.count; i++) {
+            if (ids[i] !== 65535) heights.push(pos.getY(i));
+        }
+        if (!heights.length) return null;
+        heights.sort((a, b) => a - b);
+        const at = (p: number) => heights[Math.floor((heights.length - 1) * p)];
+        return { min: heights[0], p1: at(0.01), p10: at(0.1), p99: at(0.99), max: heights[heights.length - 1] };
+    }
+
+    resetFlood(): void {
         if (this.waterMesh) {
             this.viewer.scene.remove(this.waterMesh);
             this.waterMesh.geometry.dispose();
+            (this.waterMesh.material as THREE.Material).dispose();
             this.waterMesh = null;
         }
+        this.floodOriginal = null;
+        this.floodGeometry = null;
+    }
+
+    /** level in scene-Y metres; null restores the exact original colour buffer */
+    setFlood(level: number | null): { area: number; volume: number; maxDepth: number; wetPct: number } | null {
+        const g = this.viewer.getGeometry();
+        if (!g || !this.prov.frameIds) return null;
+        const col = g.getAttribute('color') as THREE.BufferAttribute | undefined;
+        if (!col || !(col.array instanceof Float32Array)) return null;
+        const ca = col.array;
         if (level === null) {
-            this.prov.applyTints();
+            if (this.floodOriginal && this.floodGeometry === g && ca.length === this.floodOriginal.length) {
+                ca.set(this.floodOriginal);
+                col.needsUpdate = true;
+            }
+            this.resetFlood();
             return null;
         }
+        if (this.floodGeometry !== g || !this.floodOriginal) {
+            this.floodOriginal = new Float32Array(ca);
+            this.floodGeometry = g;
+        }
+        const base = this.floodOriginal;
         const pos = g.getAttribute('position') as THREE.BufferAttribute;
         const n = pos.count;
-        const col = g.getAttribute('color') as THREE.BufferAttribute | undefined;
-        const base = g.userData.baseTint as Float32Array | undefined;
-        if (!col || !base) return null;
-        const ca = col.array as Float32Array;
-        // cell size estimate: sqrt(area/n) — from bounding box
         g.computeBoundingBox();
-        const size = new THREE.Vector3();
-        g.boundingBox!.getSize(size);
-        const cellArea = (size.x * size.z) / n;
-        let wet = 0;
-        // connectivity check for "isolated raised structures": cells above
-        // water fully surrounded by water — skip for simplicity, just tint
+        const bb = g.boundingBox!;
+        const dx = bb.max.x - bb.min.x;
+        const dz = bb.max.z - bb.min.z;
+        const cellSize = Math.sqrt((dx * dz) / n);
+        const cellArea = cellSize * cellSize;
+        const cells = new Map<string, { sum: number; count: number }>();
+        let wet = 0, maxDepth = 0;
         for (let i = 0; i < n; i++) {
-            if (pos.getY(i) <= level && this.prov.frameIds[i] !== 65535) {
-                ca[i * 3] = WATER.r; ca[i * 3 + 1] = WATER.g; ca[i * 3 + 2] = WATER.b;
-                wet++;
-            } else if (pos.getY(i) <= level) {
-                ca[i * 3] = WATER.r * 0.5; ca[i * 3 + 1] = WATER.g * 0.5; ca[i * 3 + 2] = WATER.b * 0.6;
+            const j = i * 3;
+            const depth = level - pos.getY(i);
+            if (depth > 0 && this.prov.frameIds[i] !== 65535) {
+                const blend = 0.35 + 0.5 * Math.min(depth / 2, 1);
+                ca[j] = base[j] * (1 - blend) + WATER.r * blend;
+                ca[j + 1] = base[j + 1] * (1 - blend) + WATER.g * blend;
+                ca[j + 2] = base[j + 2] * (1 - blend) + WATER.b * blend;
+                const key = `${Math.floor((pos.getX(i) - bb.min.x) / cellSize)},${Math.floor((pos.getZ(i) - bb.min.z) / cellSize)}`;
+                const cell = cells.get(key) ?? { sum: 0, count: 0 };
+                cell.sum += depth;
+                cell.count++;
+                cells.set(key, cell);
+                maxDepth = Math.max(maxDepth, depth);
                 wet++;
             } else {
-                ca[i * 3] = base[i * 3]; ca[i * 3 + 1] = base[i * 3 + 1]; ca[i * 3 + 2] = base[i * 3 + 2];
+                ca[j] = base[j]; ca[j + 1] = base[j + 1]; ca[j + 2] = base[j + 2];
             }
         }
         col.needsUpdate = true;
-        // translucent water plane
-        g.computeBoundingBox();
-        const bb = g.boundingBox!;
-        const water = new THREE.Mesh(
-            new THREE.PlaneGeometry(bb.max.x - bb.min.x + 4, bb.max.z - bb.min.z + 4),
-            new THREE.MeshBasicMaterial({
-                color: 0x2d6fec, transparent: true, opacity: 0.22,
-                depthWrite: false, side: THREE.DoubleSide,
-            })
+        if (this.waterMesh) {
+            this.viewer.scene.remove(this.waterMesh);
+            this.waterMesh.geometry.dispose();
+            (this.waterMesh.material as THREE.Material).dispose();
+        }
+        this.waterMesh = new THREE.Mesh(
+            new THREE.PlaneGeometry(dx, dz),
+            new THREE.MeshBasicMaterial({ color: WATER, transparent: true, opacity: 0.4,
+                depthWrite: false, side: THREE.DoubleSide })
         );
-        water.rotation.x = -Math.PI / 2;
-        water.position.set((bb.max.x + bb.min.x) / 2, level, (bb.max.z + bb.min.z) / 2);
-        this.viewer.scene.add(water);
-        this.waterMesh = water;
-        return { area: wet * cellArea, isolated: 0 };
+        this.waterMesh.rotation.x = -Math.PI / 2;
+        this.waterMesh.position.set((bb.min.x + bb.max.x) / 2, level, (bb.min.z + bb.max.z) / 2);
+        this.viewer.scene.add(this.waterMesh);
+        let volume = 0;
+        for (const cell of cells.values()) volume += (cell.sum / cell.count) * cellArea;
+        return { area: cells.size * cellArea, volume, maxDepth, wetPct: wet * 100 / n };
     }
 
     /* ── landing zones (T12) ──────────────────────────────── */

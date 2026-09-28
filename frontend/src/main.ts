@@ -621,6 +621,7 @@ async function startRun(opts?: {
 
     const url = await backend.modelUrl();
     const info = await viewer.loadModel(url);
+    analysis.resetFlood();
     store.patch({
       status: 'done',
       statusText: 'Complete',
@@ -661,6 +662,7 @@ async function startRun(opts?: {
       }
       framesPanel.refresh();
       provenance.applyTints();
+      configureFlood();
       updateGpsIndicator();
     } else {
       framesPanel.refresh();
@@ -797,6 +799,7 @@ store.on('reliefExag', (v) => analysis.setExaggeration(v));
 let viewshedArmed = false;
 let lzMarkers: THREE.Object3D[] = [];
 
+let configureFlood = (): void => {};
 const analysisSection = new Section('Analysis (2.5D)');
 {
   const floodSlider = new Slider(0, 30, 0.5, 0, ' m');
@@ -814,6 +817,12 @@ const analysisSection = new Section('Analysis (2.5D)');
   floodSlider.onChange((v: number) => {
     if (floodOn.classList.contains('on')) applyFlood(v);
   });
+  configureFlood = () => {
+    const r = analysis.heightRange();
+    if (!r) return;
+    floodSlider.setRange(r.p1, r.p99, Math.max(0.01, (r.p99 - r.p1) / 200), r.p10);
+    if (floodOn.classList.contains('on')) applyFlood(r.p10);
+  };
   analysisSection.body.appendChild(floodRow);
   analysisSection.body.appendChild(field('Level', floodSlider.el));
 
@@ -853,8 +862,13 @@ function setAnalysisText(html: string): void {
 
 function applyFlood(level: number | null): void {
   const r = analysis.setFlood(level);
-  if (r) setAnalysisText(`<div class="footnote">Flooded area ≈ ${r.area.toFixed(0)} m² (est.)</div>`);
-  else if (level === null) setAnalysisText('');
+  if (r && level !== null) {
+    const min = analysis.heightRange()?.min ?? 0;
+    setAnalysisText(`<div class="footnote">Level ${(level - min).toFixed(2)} m above lowest ground` +
+      ` (local ENU Y ${(level - viewer.translateVec.y).toFixed(2)} m). ` +
+      `Flooded ${r.wetPct.toFixed(1)}% · area ≈ ${r.area.toFixed(0)} m² · ` +
+      `volume ≈ ${r.volume.toFixed(0)} m³ · max depth ${r.maxDepth.toFixed(2)} m (est.)</div>`);
+  } else if (level === null) setAnalysisText('');
 }
 
 function findLZ(): void {

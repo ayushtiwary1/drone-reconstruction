@@ -40,8 +40,8 @@ export class Slider {
     this.num.addEventListener('change', () => {
       let v = parseFloat(this.num.value);
       if (Number.isNaN(v)) v = initial;
-      v = Math.min(max, Math.max(min, v));
-      v = Math.round(v / step) * step;
+      v = Math.min(Number(this.range.max), Math.max(Number(this.range.min), v));
+      v = Math.round(v / this.step) * this.step;
       this.range.value = String(v);
       this.num.value = this.fmt(v);
       this.emit(v);
@@ -60,6 +60,14 @@ export class Slider {
   setValue(v: number): void {
     this.range.value = String(v);
     this.num.value = this.fmt(v);
+  }
+
+  setRange(min: number, max: number, step: number, value: number): void {
+    this.step = step;
+    this.range.min = this.num.min = String(min);
+    this.range.max = this.num.max = String(max);
+    this.range.step = this.num.step = String(step);
+    this.setValue(value);
   }
 
   private emit(v: number): void {
