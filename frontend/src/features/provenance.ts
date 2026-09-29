@@ -52,6 +52,7 @@ export class Provenance {
 
     markers = new THREE.Group();
     footprints = new THREE.Group();
+    private markerInstances: THREE.InstancedMesh | null = null;
 
     tool: RegionTool = 'off';
     private pts: { x: number; y: number }[] = [];
@@ -103,7 +104,7 @@ export class Provenance {
             this.cams = JSON.parse(await (await fetch(backend.artifactUrl(cj))).text());
             this.loaded = true;
             this.buildMarkers();
-            this.computeConfidence();
+            await this.computeConfidence();
             return true;
         } catch (err) {
             this.onLog?.(`[SEL] provenance artifacts unavailable: ${err}`);
@@ -120,87 +121,88 @@ export class Provenance {
     /* ── camera markers + footprints ──────────────────────── */
 
     private buildMarkers(): void {
-        this.markers.clear();
-        this.footprints.clear();
-        const geo = new THREE.SphereGeometry(1, 8, 8);
-        const t = this.viewer.translateVec;
-        for (const c of this.cams) {
-            const m = new THREE.Mesh(geo, this.markerMat(c.frame));
-            m.position.set(c.cam[0], c.cam[1], c.cam[2]).add(t);
-            m.userData.frame = c.frame;
-            this.markers.add(m);
-            if (c.footprint && c.footprint.length === 4) {
-                const pts: THREE.Vector3[] = [];
-                for (const [x, z] of c.footprint) {
-                    pts.push(new THREE.Vector3(x + t.x, 0.15, z + t.z));
+        for (const group of [this.markers, this.footprints]) {
+            for (const child of group.children) {
+                if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments) {
+                    child.geometry.dispose();
+                    (child.material as THREE.Material).dispose();
                 }
-                pts.push(pts[0].clone());
-                const g = new THREE.BufferGeometry().setFromPoints(pts);
-                this.footprints.add(new THREE.Line(
-                    g, new THREE.LineBasicMaterial({ color: 0x8a8a8a, transparent: true, opacity: 0.35 })));
+            }
+            group.clear();
+        }
+        this.markerInstances = null;
+        if (!this.cams.length) return;
+        const instances = new THREE.InstancedMesh(
+            new THREE.SphereGeometry(1, 8, 8),
+            new THREE.MeshBasicMaterial({ color: 0xffffff }),
+            this.cams.length
+        );
+        const transform = new THREE.Object3D();
+        const t = this.viewer.translateVec;
+        const lines: number[] = [];
+        for (let i = 0; i < this.cams.length; i++) {
+            const c = this.cams[i];
+            transform.position.set(c.cam[0] + t.x, c.cam[1] + t.y, c.cam[2] + t.z);
+            transform.updateMatrix();
+            instances.setMatrixAt(i, transform.matrix);
+            instances.setColorAt(i, this.markerColor(c.frame));
+            if (c.footprint?.length === 4) {
+                for (const [a, b] of [[0, 1], [1, 3], [3, 2], [2, 0]]) {
+                    for (const j of [a, b]) {
+                        lines.push(c.footprint[j][0] + t.x, 0.15, c.footprint[j][1] + t.z);
+                    }
+                }
             }
         }
+        instances.instanceMatrix.needsUpdate = true;
+        this.markerInstances = instances;
+        this.markers.add(instances);
+        if (lines.length) {
+            const geo = new THREE.BufferGeometry();
+            geo.setAttribute('position', new THREE.Float32BufferAttribute(lines, 3));
+            this.footprints.add(new THREE.LineSegments(geo,
+                new THREE.LineBasicMaterial({ color: 0x8a8a8a, transparent: true, opacity: 0.35 })));
+        }
+        this.viewer.invalidate();
     }
 
-    private markerMat(f: number): THREE.Material {
-        const col = this.excluded.has(f) ? EXC
+    private markerColor(f: number): THREE.Color {
+        return this.excluded.has(f) ? EXC
             : this.selected.has(f) ? ACCENT
             : new THREE.Color(0x9a9a9a);
-        return new THREE.MeshBasicMaterial({ color: col });
     }
 
     refreshMarkers(): void {
-        for (const m of this.markers.children) {
-            (m as THREE.Mesh).material = this.markerMat(m.userData.frame as number);
-        }
+        if (!this.markerInstances) return;
+        this.cams.forEach((c, i) => this.markerInstances!.setColorAt(i, this.markerColor(c.frame)));
+        if (this.markerInstances.instanceColor) this.markerInstances.instanceColor.needsUpdate = true;
+        this.viewer.invalidate();
     }
 
     /* ── confidence field (T7) ────────────────────────────── */
 
-    private computeConfidence(): void {
-        const n = this.frameIds?.length ?? 0;
-        if (!n) return;
-        const conf = new Float32Array(n);
+    private async computeConfidence(): Promise<void> {
         const pos = this.viewer.getGeometry()?.getAttribute('position');
-        if (!pos) { this.confidence = conf; return; }
-        // per-frame cam lookup
-        const camMap = new Map<number, number[]>();
-        for (const c of this.cams) camMap.set(c.frame, c.cam);
-        const t = this.viewer.translateVec;
-        // distance distribution → normalize at p90
-        const dists = new Float32Array(n);
-        for (let i = 0; i < n; i++) {
-            const f = this.frameIds![i];
-            const c = camMap.get(f);
-            if (!c) { dists[i] = 0; continue; }
-            const dx = pos.getX(i) - (c[0] + t.x);
-            const dy = pos.getY(i) - (c[1] + t.y);
-            const dz = pos.getZ(i) - (c[2] + t.z);
-            dists[i] = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (!pos || !this.frameIds?.length) return;
+        const positions = new Float32Array(pos.array as Float32Array);
+        const ids = new Uint16Array(this.frameIds);
+        const views = this.viewCounts ? new Uint16Array(this.viewCounts) : null;
+        const worker = new Worker(new URL('./confidence.worker.ts', import.meta.url), { type: 'module' });
+        try {
+            this.confidence = await new Promise<Float32Array>((resolve, reject) => {
+                worker.onmessage = (e: MessageEvent<ArrayBuffer>) => resolve(new Float32Array(e.data));
+                worker.onerror = (e) => reject(new Error(e.message));
+                worker.postMessage({
+                    positions: positions.buffer,
+                    ids: ids.buffer,
+                    views: views?.buffer ?? null,
+                    cams: this.cams,
+                    translate: this.viewer.translateVec.toArray(),
+                }, { transfer: [positions.buffer, ids.buffer, ...(views ? [views.buffer] : [])] });
+            });
+        } finally {
+            worker.terminate();
         }
-        const sorted = Array.from(dists).sort((a, b) => a - b);
-        const d90 = Math.max(sorted[Math.floor(n * 0.9)], 1e-3);
-        // neighbour gradient via 1 m grid mean
-        const cell = 1.5;
-        const grid = new Map<string, { s: number; c: number }>();
-        for (let i = 0; i < n; i++) {
-            const k = `${Math.floor(pos.getX(i) / cell)},${Math.floor(pos.getZ(i) / cell)}`;
-            const g = grid.get(k) ?? { s: 0, c: 0 };
-            g.s += pos.getY(i); g.c++;
-            grid.set(k, g);
-        }
-        for (let i = 0; i < n; i++) {
-            const f = this.frameIds![i];
-            if (f === 65535) { conf[i] = 0.02; continue; }
-            const vc = this.viewCounts ? this.viewCounts[i] : 1;
-            const dTerm = Math.max(0, 1 - dists[i] / d90);
-            const k = `${Math.floor(pos.getX(i) / cell)},${Math.floor(pos.getZ(i) / cell)}`;
-            const g = grid.get(k)!;
-            const grad = Math.abs(pos.getY(i) - g.s / g.c);
-            const gTerm = Math.exp(-grad * 0.7);
-            conf[i] = Math.min(1, vc / 6) * 0.45 + dTerm * 0.35 + gTerm * 0.2;
-        }
-        this.confidence = conf;
     }
 
     /* ── tints ────────────────────────────────────────────── */
@@ -238,6 +240,7 @@ export class Provenance {
             }
         }
         col.needsUpdate = true;
+        this.viewer.invalidate();
     }
 
     /* ── selection ops ────────────────────────────────────── */
@@ -332,11 +335,17 @@ export class Provenance {
     }
 
     private onUp(_e: PointerEvent): void {
-        if (this.pts.length > 2) this.applyRegion();
-        this.pts = [];
-        this.boxStart = null;
-        this.clearOverlay();
-        if (this.tool !== 'off') this.setTool('off');
+        if (this.pts.length > 2) {
+            void this.applyRegion(this.pts.slice()).finally(() => {
+                this.pts = [];
+                this.boxStart = null;
+                this.setTool('off');
+            });
+        } else {
+            this.pts = [];
+            this.boxStart = null;
+            this.setTool('off');
+        }
     }
 
     private sizeOverlay(): void {
@@ -372,7 +381,7 @@ export class Provenance {
 
     /* ── region → frames ──────────────────────────────────── */
 
-    private applyRegion(): void {
+    private async applyRegion(poly: { x: number; y: number }[]): Promise<void> {
         const g = this.viewer.getGeometry();
         if (!g || !this.frameIds) return;
         const pos = g.getAttribute('position') as THREE.BufferAttribute;
@@ -380,17 +389,22 @@ export class Provenance {
         const w = this.viewer.canvas.clientWidth;
         const h = this.viewer.canvas.clientHeight;
         const v = new THREE.Vector3();
+        this.viewer.camera.updateMatrixWorld();
+        const mvp = new THREE.Matrix4().multiplyMatrices(this.viewer.camera.projectionMatrix, this.viewer.camera.matrixWorldInverse);
         this.regionMask = new Uint8Array(n);
         let inside = 0;
-        for (let i = 0; i < n; i++) {
-            v.fromBufferAttribute(pos, i).project(this.viewer.camera);
-            if (v.z > 1) continue;
-            const sx = (v.x * 0.5 + 0.5) * w;
-            const sy = (-v.y * 0.5 + 0.5) * h;
-            if (pointInPoly(sx, sy, this.pts)) {
-                this.regionMask[i] = 1;
-                inside++;
+        for (let offset = 0; offset < n; offset += 100_000) {
+            for (let i = offset; i < Math.min(n, offset + 100_000); i++) {
+                v.fromBufferAttribute(pos, i).applyMatrix4(mvp);
+                if (v.z > 1) continue;
+                const sx = (v.x * 0.5 + 0.5) * w;
+                const sy = (-v.y * 0.5 + 0.5) * h;
+                if (pointInPoly(sx, sy, poly)) {
+                    this.regionMask[i] = 1;
+                    inside++;
+                }
             }
+            if (offset + 100_000 < n) await new Promise<void>((resolve) => setTimeout(resolve, 0));
         }
         if (!inside) {
             this.regionMask = null;

@@ -58,8 +58,8 @@ export function cancelTween(): void {
   activeTween = null;
 }
 
-export function updateTween(camera: THREE.PerspectiveCamera, controls: OrbitControls): void {
-  if (!activeTween) return;
+export function updateTween(camera: THREE.PerspectiveCamera, controls: OrbitControls): boolean {
+  if (!activeTween) return false;
   const t = Math.min(1, (performance.now() - activeTween.t0) / activeTween.dur);
   const k = easeInOut(t);
   camera.position.lerpVectors(activeTween.fromPos, activeTween.toPos, k);
@@ -69,6 +69,7 @@ export function updateTween(camera: THREE.PerspectiveCamera, controls: OrbitCont
     activeTween = null;
     controls.enabled = true;
   }
+  return true;
 }
 
 /**

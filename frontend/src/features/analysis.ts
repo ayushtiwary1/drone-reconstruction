@@ -20,8 +20,14 @@ export class Analysis {
     private origIndex: THREE.BufferAttribute | null = null;
     private exagApplied = 1;
     private waterMesh: THREE.Mesh | null = null;
-    private floodOriginal: Float32Array | null = null;
-    private floodGeometry: THREE.BufferGeometry | null = null;
+    private floodStats: {
+        geometry: THREE.BufferGeometry;
+        version: number;
+        min: number; max: number; step: number;
+        counts: Uint32Array; sums: Float64Array;
+        observed: number; cellArea: number;
+        range: { min: number; p1: number; p10: number; p99: number; max: number };
+    } | null = null;
     onLog: ((m: string) => void) | null = null;
 
     constructor(viewer: Viewer, prov: Provenance) {
@@ -76,6 +82,7 @@ export class Analysis {
         g.computeBoundingBox();
         g.computeBoundingSphere();
         this.exagApplied = k;
+        this.viewer.invalidate();
     }
 
     /* ── flood simulation (T11) ───────────────────────────── */
@@ -85,14 +92,45 @@ export class Analysis {
         const ids = this.prov.frameIds;
         if (!g || !ids) return null;
         const pos = g.getAttribute('position') as THREE.BufferAttribute;
-        const heights: number[] = [];
+        if (this.floodStats?.geometry === g && this.floodStats.version === pos.version) return this.floodStats.range;
+        let min = Infinity, max = -Infinity, observed = 0;
         for (let i = 0; i < pos.count; i++) {
-            if (ids[i] !== 65535) heights.push(pos.getY(i));
+            if (ids[i] === 65535) continue;
+            const y = pos.getY(i);
+            min = Math.min(min, y); max = Math.max(max, y); observed++;
         }
-        if (!heights.length) return null;
-        heights.sort((a, b) => a - b);
-        const at = (p: number) => heights[Math.floor((heights.length - 1) * p)];
-        return { min: heights[0], p1: at(0.01), p10: at(0.1), p99: at(0.99), max: heights[heights.length - 1] };
+        if (!observed) return null;
+        const bins = 4096;
+        const step = Math.max((max - min) / (bins - 1), 1e-6);
+        const counts = new Uint32Array(bins);
+        const sums = new Float64Array(bins);
+        for (let i = 0; i < pos.count; i++) {
+            if (ids[i] === 65535) continue;
+            const y = pos.getY(i);
+            const b = Math.min(bins - 1, Math.floor((y - min) / step));
+            counts[b]++; sums[b] += y;
+        }
+        let count = 0, sum = 0;
+        for (let b = 0; b < bins; b++) {
+            count += counts[b]; sum += sums[b];
+            counts[b] = count; sums[b] = sum;
+        }
+        const at = (p: number) => {
+            const target = Math.floor((observed - 1) * p);
+            let lo = 0, hi = bins - 1;
+            while (lo < hi) {
+                const mid = (lo + hi) >>> 1;
+                if (counts[mid] > target) hi = mid;
+                else lo = mid + 1;
+            }
+            return min + lo * step;
+        };
+        g.computeBoundingBox();
+        const bb = g.boundingBox!;
+        const cellArea = (bb.max.x - bb.min.x) * (bb.max.z - bb.min.z) / pos.count;
+        const range = { min, p1: at(.01), p10: at(.1), p99: at(.99), max };
+        this.floodStats = { geometry: g, version: pos.version, min, max, step, counts, sums, observed, cellArea, range };
+        return range;
     }
 
     resetFlood(): void {
@@ -102,76 +140,40 @@ export class Analysis {
             (this.waterMesh.material as THREE.Material).dispose();
             this.waterMesh = null;
         }
-        this.floodOriginal = null;
-        this.floodGeometry = null;
+        this.floodStats = null;
+        this.viewer.setFloodLevel?.(null);
     }
 
     /** level in scene-Y metres; null restores the exact original colour buffer */
     setFlood(level: number | null): { area: number; volume: number; maxDepth: number; wetPct: number } | null {
         const g = this.viewer.getGeometry();
         if (!g || !this.prov.frameIds) return null;
-        const col = g.getAttribute('color') as THREE.BufferAttribute | undefined;
-        if (!col || !(col.array instanceof Float32Array)) return null;
-        const ca = col.array;
         if (level === null) {
-            if (this.floodOriginal && this.floodGeometry === g && ca.length === this.floodOriginal.length) {
-                ca.set(this.floodOriginal);
-                col.needsUpdate = true;
-            }
             this.resetFlood();
             return null;
         }
-        if (this.floodGeometry !== g || !this.floodOriginal) {
-            this.floodOriginal = new Float32Array(ca);
-            this.floodGeometry = g;
-        }
-        const base = this.floodOriginal;
-        const pos = g.getAttribute('position') as THREE.BufferAttribute;
-        const n = pos.count;
-        g.computeBoundingBox();
+        this.heightRange();
+        const stats = this.floodStats;
+        if (!stats) return null;
+        this.viewer.setFloodLevel?.(level, this.prov.frameIds);
         const bb = g.boundingBox!;
-        const dx = bb.max.x - bb.min.x;
-        const dz = bb.max.z - bb.min.z;
-        const cellSize = Math.sqrt((dx * dz) / n);
-        const cellArea = cellSize * cellSize;
-        const cells = new Map<string, { sum: number; count: number }>();
-        let wet = 0, maxDepth = 0;
-        for (let i = 0; i < n; i++) {
-            const j = i * 3;
-            const depth = level - pos.getY(i);
-            if (depth > 0 && this.prov.frameIds[i] !== 65535) {
-                const blend = 0.35 + 0.5 * Math.min(depth / 2, 1);
-                ca[j] = base[j] * (1 - blend) + WATER.r * blend;
-                ca[j + 1] = base[j + 1] * (1 - blend) + WATER.g * blend;
-                ca[j + 2] = base[j + 2] * (1 - blend) + WATER.b * blend;
-                const key = `${Math.floor((pos.getX(i) - bb.min.x) / cellSize)},${Math.floor((pos.getZ(i) - bb.min.z) / cellSize)}`;
-                const cell = cells.get(key) ?? { sum: 0, count: 0 };
-                cell.sum += depth;
-                cell.count++;
-                cells.set(key, cell);
-                maxDepth = Math.max(maxDepth, depth);
-                wet++;
-            } else {
-                ca[j] = base[j]; ca[j + 1] = base[j + 1]; ca[j + 2] = base[j + 2];
-            }
+        if (!this.waterMesh) {
+            this.waterMesh = new THREE.Mesh(
+                new THREE.PlaneGeometry(bb.max.x - bb.min.x, bb.max.z - bb.min.z),
+                new THREE.MeshBasicMaterial({ color: WATER, transparent: true, opacity: 0.4,
+                    depthWrite: false, side: THREE.DoubleSide })
+            );
+            this.waterMesh.rotation.x = -Math.PI / 2;
+            this.waterMesh.position.set((bb.min.x + bb.max.x) / 2, level, (bb.min.z + bb.max.z) / 2);
+            this.viewer.scene.add(this.waterMesh);
         }
-        col.needsUpdate = true;
-        if (this.waterMesh) {
-            this.viewer.scene.remove(this.waterMesh);
-            this.waterMesh.geometry.dispose();
-            (this.waterMesh.material as THREE.Material).dispose();
-        }
-        this.waterMesh = new THREE.Mesh(
-            new THREE.PlaneGeometry(dx, dz),
-            new THREE.MeshBasicMaterial({ color: WATER, transparent: true, opacity: 0.4,
-                depthWrite: false, side: THREE.DoubleSide })
-        );
-        this.waterMesh.rotation.x = -Math.PI / 2;
-        this.waterMesh.position.set((bb.min.x + bb.max.x) / 2, level, (bb.min.z + bb.max.z) / 2);
-        this.viewer.scene.add(this.waterMesh);
-        let volume = 0;
-        for (const cell of cells.values()) volume += (cell.sum / cell.count) * cellArea;
-        return { area: cells.size * cellArea, volume, maxDepth, wetPct: wet * 100 / n };
+        this.waterMesh.position.y = level;
+        this.viewer.invalidate?.();
+        const bin = Math.min(stats.counts.length - 1, Math.max(0, Math.floor((level - stats.min) / stats.step)));
+        const wet = level < stats.min ? 0 : stats.counts[bin];
+        const volume = Math.max(0, (wet * level - (wet ? stats.sums[bin] : 0)) * stats.cellArea);
+        return { area: wet * stats.cellArea, volume,
+            maxDepth: Math.max(0, level - stats.min), wetPct: wet * 100 / g.getAttribute('position').count };
     }
 
     /* ── landing zones (T12) ──────────────────────────────── */
@@ -252,6 +254,7 @@ export class Analysis {
                 }
             }
             col.needsUpdate = true;
+            this.viewer.invalidate();
         }
         return chosen;
     }
@@ -314,7 +317,8 @@ export class Analysis {
         );
         marker.position.copy(obs).setY(oy);
         this.viewer.scene.add(marker);
-        window.setTimeout(() => this.viewer.scene.remove(marker), 12000);
+        window.setTimeout(() => { this.viewer.scene.remove(marker); this.viewer.invalidate(); }, 12000);
+        this.viewer.invalidate();
         return { visible: vis, dead };
     }
 

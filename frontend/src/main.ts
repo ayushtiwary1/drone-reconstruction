@@ -734,6 +734,7 @@ function showEmptyState(): void {
 if (!viewer.hasModel()) showEmptyState();
 
 viewer.onCursor = (p) => store.set('cursor', p);
+viewer.canvas.addEventListener('pointerdown', () => viewer.invalidate());
 
 viewer.onModelClick = (p, idx) => {
   // Viewshed arm: click sets the observer point.
@@ -789,6 +790,7 @@ store.on('measurements', (ms) => {
   // Sync 3D objects: add new, drop removed.
   viewer.measure.clearAll();
   for (const m of ms) viewer.measure.add(m);
+  viewer.invalidate();
 });
 
 /* ── Terrain analysis bindings (T7/T8/T11–T14) ────────────── */

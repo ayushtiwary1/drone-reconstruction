@@ -53,12 +53,16 @@ export class Viewer {
   private raycastProxy: THREE.Points | null = null;
   private raycaster = new THREE.Raycaster();
   private ndc = new THREE.Vector2();
-  private pendingCursor: { x: number; y: number } | null = null;
+  private raf = 0;
+  private dirty = true;
+  private interacting = false;
 
   private mode: ViewMode = 'mesh';
   private colorMode: ColorMode = 'rgb';
   private pointSize = 2.0;
   private modelRad = 40;
+  private waterLevel = { value: -1e9 };
+  private waterColor = { value: new THREE.Color(0x2d6fec) };
 
   private fpsFrames = 0;
   private fpsLast = performance.now();
@@ -89,7 +93,9 @@ export class Viewer {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
     this.controls = createControls(this.camera, this.canvas);
-    this.controls.addEventListener('start', () => cancelTween());
+    this.controls.addEventListener('start', () => { cancelTween(); this.interacting = true; this.invalidate(); });
+    this.controls.addEventListener('end', () => { this.interacting = false; this.invalidate(); });
+    this.controls.addEventListener('change', () => this.invalidate());
 
     this.grid = new THREE.GridHelper(500, 100, 0x4a4a4a, 0x2c2c2c);
     (this.grid.material as THREE.Material).transparent = true;
@@ -124,21 +130,17 @@ export class Viewer {
     new ResizeObserver(() => this.resize()).observe(container);
     this.resize();
 
-    this.canvas.addEventListener('pointermove', (e) => {
-      const r = this.canvas.getBoundingClientRect();
-      this.pendingCursor = { x: e.clientX - r.left, y: e.clientY - r.top };
-    });
-    this.canvas.addEventListener('pointerleave', () => {
-      this.pendingCursor = null;
-      this.onCursor?.(null);
-    });
+    this.canvas.addEventListener('pointerleave', () => this.onCursor?.(null));
     this.canvas.addEventListener('pointerdown', (e) => {
       if (e.button !== 0 || !this.onModelClick) return;
       const hit = this.pickVertexAt(e.clientX, e.clientY);
-      if (hit) this.onModelClick(hit.point, hit.index);
+      if (hit) {
+        this.onCursor?.([hit.point.x, hit.point.y, hit.point.z]);
+        this.onModelClick(hit.point, hit.index);
+      }
     });
 
-    this.animate();
+    this.invalidate();
   }
 
   /* ── layout ──────────────────────────────────────────── */
@@ -151,6 +153,7 @@ export class Viewer {
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.invalidate();
   }
 
   /* ── overlays ────────────────────────────────────────── */
@@ -246,17 +249,13 @@ export class Viewer {
     this.afterColor?.();
     const wantMesh = this.mode === 'mesh' && Boolean(this.geometry.index);
     if (wantMesh) {
-      const mesh = new THREE.Mesh(
-        this.geometry,
-        new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide })
-      );
-      this.modelObject = mesh;
+      const material = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
+      this.configureFloodMaterial(material);
+      this.modelObject = new THREE.Mesh(this.geometry, material);
     } else {
-      const pts = new THREE.Points(
-        this.geometry,
-        new THREE.PointsMaterial({ size: this.pointSize, vertexColors: true, sizeAttenuation: false })
-      );
-      this.modelObject = pts;
+      const material = new THREE.PointsMaterial({ size: this.pointSize, vertexColors: true, sizeAttenuation: false });
+      this.configureFloodMaterial(material);
+      this.modelObject = new THREE.Points(this.geometry, material);
     }
     this.scene.add(this.modelObject);
 
@@ -269,6 +268,31 @@ export class Viewer {
       this.raycastProxy.visible = false;
       this.scene.add(this.raycastProxy);
     }
+    this.invalidate();
+  }
+
+  private configureFloodMaterial(material: THREE.MeshBasicMaterial | THREE.PointsMaterial): void {
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.uWaterLevel = this.waterLevel;
+      shader.uniforms.uWaterColor = this.waterColor;
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nattribute float observed;\nvarying float vTerrainY;\nvarying float vObserved;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvTerrainY = position.y;\nvObserved = observed;');
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', '#include <common>\nuniform float uWaterLevel;\nuniform vec3 uWaterColor;\nvarying float vTerrainY;\nvarying float vObserved;')
+        .replace('#include <color_fragment>', '#include <color_fragment>\nfloat waterDepth = uWaterLevel - vTerrainY;\nif (waterDepth > 0.0 && vObserved > 0.5) {\n  float floodBlend = 0.35 + 0.5 * clamp(waterDepth / 2.0, 0.0, 1.0);\n  diffuseColor.rgb = mix(diffuseColor.rgb, uWaterColor, floodBlend);\n}');
+    };
+    material.customProgramCacheKey = () => 'flood-v1';
+  }
+
+  setFloodLevel(level: number | null, frameIds?: Uint16Array): void {
+    if (frameIds && this.geometry && !this.geometry.hasAttribute('observed')) {
+      const observed = new Float32Array(frameIds.length);
+      for (let i = 0; i < frameIds.length; i++) observed[i] = frameIds[i] === 65535 ? 0 : 1;
+      this.geometry.setAttribute('observed', new THREE.BufferAttribute(observed, 1));
+    }
+    this.waterLevel.value = level ?? -1e9;
+    this.invalidate();
   }
 
   /* ── settings ────────────────────────────────────────── */
@@ -291,14 +315,17 @@ export class Viewer {
         o.material.needsUpdate = true;
       }
     });
+    this.invalidate();
   }
 
   setGrid(on: boolean): void {
     this.grid.visible = on;
+    this.invalidate();
   }
 
   setBackground(bg: ViewportBg): void {
     this.scene.background = new THREE.Color(BG[bg]);
+    this.invalidate();
   }
 
   /* ── camera ──────────────────────────────────────────── */
@@ -317,6 +344,7 @@ export class Viewer {
       new THREE.Vector3(0, 1, 0),
       this.modelObject ? 420 : 0
     );
+    this.invalidate();
   }
 
   setPreset(preset: ViewPreset): void {
@@ -325,6 +353,7 @@ export class Viewer {
       ? this.geometry.boundingBox!.getCenter(new THREE.Vector3())
       : new THREE.Vector3(0, 0, 0);
     tweenCamera(this.camera, this.controls, pos, target, up);
+    this.invalidate();
   }
 
   /** Raycast the model (via the points proxy) at viewport px coords. */
@@ -335,14 +364,29 @@ export class Viewer {
 
   /** Like pickAt but also returns the vertex index (provenance lookups). */
   pickVertexAt(clientX: number, clientY: number): { point: THREE.Vector3; index: number } | null {
-    if (!this.raycastProxy) return null;
+    if (!this.geometry) return null;
     const r = this.canvas.getBoundingClientRect();
     this.ndc.set(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
     this.raycaster.setFromCamera(this.ndc, this.camera);
-    const hits = this.raycaster.intersectObject(this.raycastProxy, false);
-    if (!hits.length) return null;
-    const h = hits[0];
-    return { point: h.point, index: (h as { index?: number }).index ?? -1 };
+    const arr = this.geometry.getAttribute('position').array as Float32Array;
+    const origin = this.raycaster.ray.origin;
+    const direction = this.raycaster.ray.direction;
+    const threshold2 = (this.raycaster.params.Points?.threshold ?? 1) ** 2;
+    let nearest = Infinity;
+    let index = -1;
+    for (let j = 0; j < arr.length; j += 3) {
+      const x = arr[j] - origin.x;
+      const y = arr[j + 1] - origin.y;
+      const z = arr[j + 2] - origin.z;
+      const t = x * direction.x + y * direction.y + z * direction.z;
+      if (t < this.camera.near || t > this.camera.far || t >= nearest) continue;
+      const distance2 = x * x + y * y + z * z - t * t;
+      if (distance2 < threshold2) { nearest = t; index = j / 3; }
+    }
+    return index < 0 ? null : {
+      index,
+      point: new THREE.Vector3(arr[index * 3], arr[index * 3 + 1], arr[index * 3 + 2]),
+    };
   }
 
   /** Geometry of the loaded model (selection/analysis features). */
@@ -363,27 +407,22 @@ export class Viewer {
 
   /* ── render loop ─────────────────────────────────────── */
 
-  private animate = (): void => {
-    requestAnimationFrame(this.animate);
-    updateTween(this.camera, this.controls);
-    this.controls.update();
+  invalidate(): void {
+    this.dirty = true;
+    if (!this.raf) this.raf = requestAnimationFrame(this.draw);
+  }
 
+  private draw = (): void => {
+    this.raf = 0;
+    const tween = updateTween(this.camera, this.controls);
+    const moved = this.controls.update();
+    if (!this.dirty && !moved && !tween) return;
+    this.dirty = false;
     const w = this.container.clientWidth;
     const h = this.container.clientHeight;
     this.gizmo.draw(this.camera);
     this.scaleBar.update(this.camera, this.controls, h);
     this.measure.updateLabels(w, h);
-
-    // Cursor readout — one raycast per frame max.
-    if (this.pendingCursor) {
-      const { x, y } = this.pendingCursor;
-      this.pendingCursor = null;
-      const r = this.canvas.getBoundingClientRect();
-      const p = this.pickAt(x + r.left, y + r.top);
-      this.onCursor?.(p ? [p.x, p.y, p.z] : null);
-    }
-
-    // FPS + stats (once per second)
     this.fpsFrames++;
     const now = performance.now();
     if (now - this.fpsLast >= 1000) {
@@ -403,7 +442,7 @@ export class Viewer {
         this.statsEl.hidden = true;
       }
     }
-
     this.renderer.render(this.scene, this.camera);
+    if (tween || moved || this.interacting) this.invalidate();
   };
 }
