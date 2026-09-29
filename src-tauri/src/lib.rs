@@ -17,6 +17,16 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 use tauri::Emitter;
 
+/// Emit a pipeline-log event to the webview AND mirror it to stderr so the
+/// `cargo tauri dev` terminal shows live progress during a run.
+macro_rules! plog {
+    ($app:expr, $msg:expr $(,)?) => {{
+        let s = $msg.to_string();
+        eprintln!("{}", s);
+        let _ = $app.emit("pipeline-log", s);
+    }};
+}
+
 use image::{imageops::FilterType, GenericImageView, RgbImage};
 use ort::{
     ep,
@@ -1091,13 +1101,13 @@ fn extract_frames<R: tauri::Runtime>(video_path: &str, output_dir: &str, app: &t
 
     if let Ok(st) = cuda_status {
         if st.success() {
-            let _ = app.emit("pipeline-log", "[FFMPEG] Hardware acceleration engaged (-hwaccel cuda).");
+            plog!(app, "[FFMPEG] Hardware acceleration engaged (-hwaccel cuda).");
             return Ok(());
         }
     }
 
     // Fallback to software decoding
-    let _ = app.emit("pipeline-log", "[FFMPEG] Falling back to software frame decoding...");
+    plog!(app, "[FFMPEG] Falling back to software frame decoding...");
     let sw_status = Command::new("ffmpeg")
         .args([
             "-y",
@@ -1148,8 +1158,7 @@ fn build_ort_session<R: tauri::Runtime>(
 
     let session = match cuda_result {
         Ok(s) => {
-            let _ = app.emit(
-                "pipeline-log",
+            plog!(app,
                 "[GPU] ✓ CUDA Execution Provider engaged — device 0.",
             );
             s
@@ -1159,7 +1168,7 @@ fn build_ort_session<R: tauri::Runtime>(
                 "[WARN] RUNNING ON CPU: CUDA EP failed: {}. Check that nvcuda.dll and cudnn64_8.dll are on PATH.",
                 cuda_err
             );
-            let _ = app.emit("pipeline-log", &warn);
+            plog!(app, &warn);
 
             let cpu_ep = ep::CPU::default().build();
             Session::builder()
@@ -1254,7 +1263,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
     excluded_frames: Option<Vec<u32>>,
 ) -> Result<String, String> {
     let wall_clock = Instant::now();
-    let _ = app.emit("pipeline-log", "[SYSTEM] Initializing tactical 3D reconstruction pipeline...");
+    plog!(app, "[SYSTEM] Initializing tactical 3D reconstruction pipeline...");
 
     let threads = hardware_profile.intra_threads();
     let cell_size = hardware_profile.cell_size_m();
@@ -1264,11 +1273,11 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
     let session_mutex = build_ort_session(threads, &app, MODEL_PATH)?;
     let mut session = session_mutex.lock().map_err(|e| format!("Session lock poisoned: {}", e))?;
     let t_session = t_session_start.elapsed();
-    let _ = app.emit("pipeline-log", format!("[TIME] Session initialization: {:.2?}", t_session));
+    plog!(app, format!("[TIME] Session initialization: {:.2?}", t_session));
 
     // ── 2. Frame Extraction ──────────────────────────────────
     let t_ffmpeg_start = Instant::now();
-    let _ = app.emit("pipeline-log", "[FFMPEG] Slicing video into 1-fps frames...");
+    plog!(app, "[FFMPEG] Slicing video into 1-fps frames...");
     extract_frames(&video_path, TEMP_FRAMES_DIR, &app)?;
     let _guard = TempDirGuard { path: TEMP_FRAMES_DIR.to_string() };
 
@@ -1284,8 +1293,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
         return Err("[FFMPEG] No frames were extracted. Verify the video file is valid.".into());
     }
     let t_ffmpeg = t_ffmpeg_start.elapsed();
-    let _ = app.emit(
-        "pipeline-log",
+    plog!(app,
         format!("[FFMPEG] {} frames extracted. (Time: {:.2?})", num_frames, t_ffmpeg),
     );
 
@@ -1293,7 +1301,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
     let (telemetry, tele_warnings) = parse_telemetry(&telemetry_path)?;
     let has_telemetry = !telemetry.is_empty();
     for w in &tele_warnings {
-        let _ = app.emit("pipeline-log", w.clone());
+        plog!(app, w.clone());
     }
 
     if has_telemetry {
@@ -1301,21 +1309,18 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
             - telemetry.first().map(|p| p.timestamp_sec).unwrap_or(0.0);
         let video_dur = num_frames as f32;
         if (video_dur - srt_dur).abs() > 2.0 {
-            let _ = app.emit(
-                "pipeline-log",
+            plog!(app,
                 format!(
                     "[WARN] Video duration ({:.1}s) and telemetry duration ({:.1}s) differ by >2s!",
                     video_dur, srt_dur
                 ),
             );
         }
-        let _ = app.emit(
-            "pipeline-log",
+        plog!(app,
             format!("[TELEMETRY] Loaded {} smoothed records. Trajectory aligned.", telemetry.len()),
         );
     } else {
-        let _ = app.emit(
-            "pipeline-log",
+        plog!(app,
             "[ODOMETRY] No external telemetry provided. Pure visual odometry driving 3D trajectory.",
         );
     }
@@ -1330,8 +1335,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
         tel_t0 = telemetry.first().map(|p| p.timestamp_sec).unwrap_or(0.0);
         if let Some(manual) = sync_offset_override {
             sync_offset = manual;
-            let _ = app.emit(
-                "pipeline-log",
+            plog!(app,
                 format!("[SYNC] Manual clock-offset override: {:.2}s", manual),
             );
         } else {
@@ -1359,13 +1363,11 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
             sync_confidence = conf;
             if conf >= 0.3 {
                 sync_offset = off;
-                let _ = app.emit(
-                    "pipeline-log",
+                plog!(app,
                     format!("[SYNC] Estimated video↔telemetry offset = {:.2}s (r={:.2}) — applied.", off, conf),
                 );
             } else {
-                let _ = app.emit(
-                    "pipeline-log",
+                plog!(app,
                     format!("[WARN] [SYNC] Offset estimate {:.2}s has low confidence (r={:.2}) — keeping 0.0s. Telemetry may be wrong-window.", off, conf),
                 );
             }
@@ -1408,8 +1410,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
     let (cx, cy) = (intrinsics.cx, intrinsics.cy);
     let (fx, fy) = (intrinsics.fx, intrinsics.fy);
 
-    let _ = app.emit(
-        "pipeline-log",
+    plog!(app,
         format!(
             "[CAMERA] HFOV = {:.1}°, fx = fy = {:.1}px | Input = {}x{} (letterbox rows {}..{})",
             intrinsics.hfov_deg, fx, inp_w, inp_h, active_y_start, active_y_end
@@ -1608,7 +1609,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
         };
         last_pitch = Some(eff_pitch_deg);
         if frame_idx == 0 && measured_pitch.is_none() {
-            let _ = app.emit("pipeline-log", match horizon_pitch {
+            plog!(app, match horizon_pitch {
                 Some(p) => format!("[CAMERA] Gimbal missing; estimated pitch {:.1}° from depth sky boundary (approximate).", p),
                 None => format!("[WARN] Gimbal and sky boundary unavailable; using legacy {:.1}° pitch (unverified).", camera_pitch_deg),
             });
@@ -1828,8 +1829,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
                 }
             }
         }
-        let _ = app.emit(
-            "pipeline-log",
+        plog!(app,
             format!(
                 "[FRAME {}/{}] fused surface points={} | H_agl={:.1}m",
                 frame_idx + 1,
@@ -1841,8 +1841,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
     }
 
     let t_infer = t_infer_start.elapsed();
-    let _ = app.emit(
-        "pipeline-log",
+    plog!(app,
         format!("[TIME] Neural inference & fusion ({} frames): {:.2?}", num_frames, t_infer),
     );
 
@@ -2053,7 +2052,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
         let discarded_vertices = old_vertices - mesh_vertices.len();
         let discarded_faces = old_faces - faces.len();
         if discarded_faces > 0 {
-            let _ = app.emit("pipeline-log", format!(
+            plog!(app, format!(
                 "[WARN] Discarded {} disconnected faces / {} vertices; only the largest measured surface is exported.",
                 discarded_faces, discarded_vertices
             ));
@@ -2061,8 +2060,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
     }
 
     let t_mesh = t_mesh_start.elapsed();
-    let _ = app.emit(
-        "pipeline-log",
+    plog!(app,
         format!(
             "[MESH] Triangulation generated {} vertices and {} faces. (Time: {:.2?})",
             mesh_vertices.len(),
@@ -2076,7 +2074,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
     let vertex_count = mesh_vertices.len();
 
     fs::create_dir_all(&out_dir).map_err(|e| format!("[IO] Cannot create output dir {:?}: {}", out_dir, e))?;
-    let _ = app.emit("pipeline-log", format!("[IO] Output directory: {}", out_dir.display()));
+    plog!(app, format!("[IO] Output directory: {}", out_dir.display()));
 
     let ply_path = out_dir.join(PLY_NAME);
     let obj_path = out_dir.join(OBJ_NAME);
@@ -2236,7 +2234,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
         });
         let _ = fs::write(&report_path, serde_json::to_string_pretty(&report).unwrap());
         emit_artifact("capture_report", &report_path);
-        let _ = app.emit("pipeline-log", format!(
+        plog!(app, format!(
             "[REPORT] capture verdict: {} (blur {:.0}%, clip {:.0}%, gps gaps {}, sync r={:.2})",
             verdict, blur_pct, clip_pct, gps_gaps, sync_conf
         ));
@@ -2326,7 +2324,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
             })
             .collect();
         if let Err(e) = write_las(&las_path, &las_pts, orig_lat, orig_lon) {
-            let _ = app.emit("pipeline-log", format!("[WARN] LAS export failed: {}", e));
+            plog!(app, format!("[WARN] LAS export failed: {}", e));
         }
     }
 
@@ -2406,7 +2404,7 @@ fn run_reconstruction_inner<R: tauri::Runtime>(
         "Reconstruction complete in {:.2?} — {} vertices, {} faces written to {} (PLY, OBJ, LAS, GLB & GeoRef). Export time: {:.2?}",
         elapsed, vertex_count, faces.len(), out_dir.display(), t_export
     );
-    let _ = app.emit("pipeline-log", format!("[SUCCESS] ✓ {}", msg));
+    plog!(app, format!("[SUCCESS] ✓ {}", msg));
     Ok(msg)
 }
 
