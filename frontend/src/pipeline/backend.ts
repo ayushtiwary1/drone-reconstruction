@@ -57,8 +57,15 @@ export const EXPORT_FILES = [
   { id: 'georef', label: 'GeoRef JSON', file: '/recon_georeference.json', icon: 'file-json' },
 ] as const;
 
-const VIDEO_FILTERS = [{ name: 'Video', extensions: ['mp4', 'mov', 'mkv'] }];
-const TELEMETRY_FILTERS = [{ name: 'Telemetry', extensions: ['csv', 'srt', 'txt'] }];
+const ALL_FILES = { name: 'All files', extensions: ['*'] };
+const VIDEO_FILTERS = [
+  { name: 'Video', extensions: ['mp4', 'mov', 'mkv', 'MP4', 'MOV', 'MKV'] },
+  ALL_FILES,
+];
+const TELEMETRY_FILTERS = [
+  { name: 'Telemetry', extensions: ['csv', 'srt', 'txt', 'CSV', 'SRT', 'TXT'] },
+  ALL_FILES,
+];
 
 function fileName(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
