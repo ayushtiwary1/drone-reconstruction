@@ -48,6 +48,8 @@ export interface Measurement {
 export interface AppState {
   video: FileInput | null;
   telemetry: FileInput | null;
+  /** cap on extracted frames to use (0 = all); maps to frame_range [0, n-1] */
+  frameLimit: number;
   hardwareProfile: HardwareProfile;
   cameraPitchDeg: number;
   viewMode: ViewMode;
@@ -145,6 +147,7 @@ export function createInitialState(): AppState {
   return {
     video: null,
     telemetry: null,
+    frameLimit: 0,
     hardwareProfile: 'balanced',
     cameraPitchDeg: -45,
     viewMode: 'mesh',

@@ -615,7 +615,12 @@ async function startRun(opts?: {
       telemetryPath: telemetry?.path ?? '',
       hardwareProfile: store.get('hardwareProfile'),
       cameraPitchDeg: store.get('cameraPitchDeg'),
-      frameRange: opts?.frameRange ?? null,
+      frameRange:
+        opts?.frameRange ??
+        ((): [number, number] | null => {
+          const n = store.get('frameLimit');
+          return n > 0 ? [0, n - 1] : null;
+        })(),
       excludedFrames: opts?.excludedFrames ?? null,
     });
 

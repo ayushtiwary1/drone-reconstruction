@@ -13,6 +13,7 @@ export class ProjectPanel {
   readonly panel: Panel;
   private videoZone: DropZone;
   private telemetryZone: DropZone;
+  private frameInput: HTMLInputElement;
   private telemetryHint: HTMLDivElement;
   private startBtn: HTMLButtonElement;
   private startLabel: HTMLSpanElement;
@@ -30,6 +31,27 @@ export class ProjectPanel {
     this.videoZone = new DropZone('video', 'Video — .mp4 .mov .mkv', 'video');
     this.telemetryZone = new DropZone('telemetry', 'Telemetry — .csv .srt (optional)', 'file-text');
     this.panel.body.appendChild(this.videoZone.el);
+
+    // Frame limit — user picks how many of the 1-fps extracted frames to use.
+    const frameRow = el('div', 'slider-row');
+    frameRow.style.marginTop = '4px';
+    this.frameInput = el('input', 'input mono') as HTMLInputElement;
+    this.frameInput.type = 'number';
+    this.frameInput.min = '0';
+    this.frameInput.step = '1';
+    this.frameInput.value = '0';
+    this.frameInput.setAttribute(
+      'data-tooltip',
+      'Use only the first N extracted frames (≈1 per second of video). 0 = all.'
+    );
+    this.frameInput.addEventListener('input', () => {
+      const n = Math.max(0, Math.floor(Number(this.frameInput.value) || 0));
+      store.set('frameLimit', n);
+    });
+    frameRow.appendChild(this.frameInput);
+    frameRow.appendChild(el('span', 'field-hint', 'frames used · 0 = all'));
+    this.panel.body.appendChild(frameRow);
+
     this.panel.body.appendChild(this.telemetryZone.el);
 
     this.telemetryHint = el('div', 'field-hint');
@@ -69,7 +91,13 @@ export class ProjectPanel {
       this.telemetryZone.setFile(t);
       this.telemetryHint.hidden = t !== null;
     });
-    store.bind('status', () => this.syncStartBtn());
+    store.bind('frameLimit', (n) => {
+      if (Number(this.frameInput.value) !== n) this.frameInput.value = String(n);
+    });
+    store.bind('status', () => {
+      this.syncStartBtn();
+      this.frameInput.disabled = store.get('status') === 'running';
+    });
     store.on('frameDone', () => this.syncProgress());
     store.on('frameTotal', () => this.syncProgress());
   }
