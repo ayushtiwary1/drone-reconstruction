@@ -1,0 +1,46 @@
+{
+  "clip": "data/kabr/DJI_0212_trimmed.mp4",
+  "model": "runs/fix_connected/recon_output.ply",
+  "vertices": 1018658,
+  "triangles": 1727303,
+  "environment": {
+    "browser": "Chromium headless DevTools Protocol (actual Viewer loaded with real PLY)",
+    "gpu": "ANGLE Vulkan SwiftShader (software)",
+    "pixelRatio": 1,
+    "canvasPx": [460, 380],
+    "limitation": "Headless/background timer throttling makes rAF frame-gap and FPS incomparable to a visible GPU window; renderMs is CPU submission, not GPU completion."
+  },
+  "before": {
+    "resultLoadTransferAndParseMs": 655.9,
+    "confidenceMainThreadMs": 782.4,
+    "idle10s": {"renders": 21, "renderMsP50": 0.2, "renderMsP95": 0.4, "longtasks": 0, "drawCalls": 2, "geometries": 2, "textures": 0, "heapBytes": 92988584},
+    "orbit10s": {"renders": 122, "renderMsP50": 0.2, "renderMsP95": 0.4, "longtasks": 121, "maxLongtaskMs": 150, "drawCalls": 2, "heapBytes": 93970920},
+    "cursorRaycast12MeanMs": 104.24,
+    "lassoFullVerticesMs": 104.8,
+    "floodSetLevelMs": {"p1": 36.2, "p10": 46.6, "p99": 262.0},
+    "floodOffRestoreMs": 1.5,
+    "profilerTopSelfSamples": [
+      ["three.Vector3.distanceToSquared", 801],
+      ["three.Vector3.dot", 292],
+      ["three.Vector3.addScaledVector", 263],
+      ["three.Vector3.subVectors", 263],
+      ["three.BufferAttribute.getX", 230],
+      ["three.Points.raycast", 191],
+      ["three.Points.testPoint", 154]
+    ],
+    "backend": "run_reconstruction is async + spawn_blocking; emits per-frame progress at 1 fps; geometry is PLY file via asset path, not JSON IPC. Artifact events contain only kind/path (under 200 bytes)."
+  },
+  "after": {
+    "modelLoadTransferAndParseMs": 554.1,
+    "confidenceWorkerMs": 1153.9,
+    "confidenceMainThreadLongtasksMs": [],
+    "modelClickRaycastMs": {"times": [8.8, 4.7, 4.6, 4.6, 4.6, 4.6, 4.6, 4.7, 4.5, 4.7], "mean": 4.97},
+    "flood": {"prepMs": 35.3, "setLevelMs": [7.4, 0.0, 0.0], "wetPct": [0.585, 5.851, 57.852], "offByteIdentical": true, "drawCalls": 4, "geometries": 4},
+    "orbit": {"wallMs": 159.5, "longtasks": [], "geometries": 4, "textures": 0},
+    "reloadHeapAfterGcBytes": [94982133, 94999885, 95010881],
+    "filmstrip30FramesMs": 1117.1,
+    "filmstripLongtasks": 0,
+    "notes": "Confidence moved to confidence.worker.ts (off main thread). Flood reuses cached grid/mask; slider updates in-place colour blend. Controls render on invalidate() only. Model reload disposes geometry/materials; heap flat across 3 reloads with forced GC."
+  },
+  "unmeasured": ["actual visible GPU FPS", "reconstruction-running UI longtasks", "three consecutive Tauri reconstruction heap snapshots"]
+}

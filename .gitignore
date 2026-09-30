@@ -21,3 +21,11 @@ __pycache__/
 # Specific large folders if you have any (e.g., data/ or weights/)
 data/
 test media/
+
+# Pipeline run outputs are artifacts, never source (H6: stale bundled model bug)
+frontend/public/recon_output.*
+frontend/public/recon_georeference.json
+runs/
+
+# eval keeps small result files but not media
+eval/tmp/

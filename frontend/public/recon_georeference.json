@@ -15,16 +15,16 @@
   "bounds_wgs84": {
     "min_latitude": 0.393989,
     "max_latitude": 0.394061,
-    "min_longitude": 36.883485,
+    "min_longitude": 36.883484,
     "max_longitude": 36.884143
   },
   "metric_extents": {
-    "width_x_m": 73.21,
+    "width_x_m": 73.28,
     "height_relief_y_m": 8.05,
-    "length_z_m": 27.18
+    "length_z_m": 27.19
   },
-  "total_observed_points": 416337,
-  "total_mesh_vertices": 476378,
-  "total_mesh_faces": 902911,
+  "total_observed_points": 417331,
+  "total_mesh_vertices": 476715,
+  "total_mesh_faces": 903687,
   "deliverables": ["recon_output.ply", "recon_output.obj", "recon_output.las", "recon_output.glb", "recon_georeference.json"]
 }

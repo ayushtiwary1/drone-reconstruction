@@ -1,0 +1,64 @@
+   Compiling app v0.1.0 (/home/de3p/Documents/drone-reconstruction/src-tauri)
+    Finished `release` profile [optimized] target(s) in 37.36s
+     Running unittests src/lib.rs (target/release/deps/app_lib-8e39ad90487a087d)
+
+running 1 test
+LOG: "[SYSTEM] Initializing tactical 3D reconstruction pipeline..."
+LOG: "[GPU] ✓ CUDA Execution Provider engaged — device 0 (NVIDIA RTX 2050)."
+LOG: "[TIME] Session initialization: 307.34ms"
+LOG: "[FFMPEG] Slicing video into 1-fps frames..."
+LOG: "[FFMPEG] Hardware acceleration engaged (-hwaccel cuda)."
+LOG: "[FFMPEG] 30 frames extracted. (Time: 7.46s)"
+LOG: "[WARN] Video duration (30.0s) and telemetry duration (88.2s) differ by >2s!"
+LOG: "[TELEMETRY] Loaded 2645 smoothed records. Trajectory aligned."
+LOG: "[CAMERA] HFOV = 77.6°, fx = fy = 470.4px | Input = 756x420 (letterbox rows 0..420)"
+LOG: "[FRAME 1/30] fused surface points=170703 | H_agl=15.7m"
+LOG: "[FRAME 2/30] fused surface points=220182 | H_agl=15.7m"
+LOG: "[FRAME 3/30] fused surface points=244119 | H_agl=15.6m"
+LOG: "[FRAME 4/30] fused surface points=272382 | H_agl=15.6m"
+LOG: "[FRAME 5/30] fused surface points=279247 | H_agl=15.5m"
+LOG: "[FRAME 6/30] fused surface points=281741 | H_agl=15.5m"
+LOG: "[FRAME 7/30] fused surface points=282706 | H_agl=15.5m"
+LOG: "[FRAME 8/30] fused surface points=285142 | H_agl=15.5m"
+LOG: "[FRAME 9/30] fused surface points=286297 | H_agl=15.5m"
+LOG: "[FRAME 10/30] fused surface points=289184 | H_agl=15.5m"
+LOG: "[FRAME 11/30] fused surface points=291746 | H_agl=15.6m"
+LOG: "[FRAME 12/30] fused surface points=292922 | H_agl=15.6m"
+LOG: "[FRAME 13/30] fused surface points=294506 | H_agl=15.6m"
+LOG: "[FRAME 14/30] fused surface points=295583 | H_agl=15.7m"
+LOG: "[FRAME 15/30] fused surface points=296488 | H_agl=15.7m"
+LOG: "[FRAME 16/30] fused surface points=296657 | H_agl=15.7m"
+LOG: "[FRAME 17/30] fused surface points=296746 | H_agl=15.6m"
+LOG: "[FRAME 18/30] fused surface points=296908 | H_agl=15.6m"
+LOG: "[FRAME 19/30] fused surface points=296916 | H_agl=15.6m"
+LOG: "[FRAME 20/30] fused surface points=296925 | H_agl=15.6m"
+LOG: "[FRAME 21/30] fused surface points=296937 | H_agl=15.6m"
+LOG: "[FRAME 22/30] fused surface points=302892 | H_agl=15.6m"
+LOG: "[FRAME 23/30] fused surface points=302936 | H_agl=16.3m"
+LOG: "[FRAME 24/30] fused surface points=307796 | H_agl=17.4m"
+LOG: "[FRAME 25/30] fused surface points=316616 | H_agl=18.5m"
+LOG: "[FRAME 26/30] fused surface points=329581 | H_agl=19.5m"
+LOG: "[FRAME 27/30] fused surface points=333716 | H_agl=20.1m"
+LOG: "[FRAME 28/30] fused surface points=358075 | H_agl=21.4m"
+LOG: "[FRAME 29/30] fused surface points=380183 | H_agl=24.1m"
+LOG: "[FRAME 30/30] fused surface points=417331 | H_agl=28.2m"
+LOG: "[TIME] Neural inference & fusion (30 frames): 21.70s"
+LOG: "[MESH] Triangulation generated 476715 vertices and 903687 faces. (Time: 114.47ms)"
+LOG: "[SUCCESS] ✓ Reconstruction complete in 30.71s — 476715 vertices, 903687 faces written (PLY, OBJ, LAS, GLB & GeoRef). Export time: 435.88ms"
+[baseline] elapsed=30.732095254s result=Ok("Reconstruction complete in 30.71s — 476715 vertices, 903687 faces written (PLY, OBJ, LAS, GLB & GeoRef). Export time: 435.88ms")
+test tests::baseline_pipeline_headless ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 30.73s
+
+     Running unittests src/main.rs (target/release/deps/app-89d277c237e4e83c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests app_lib
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

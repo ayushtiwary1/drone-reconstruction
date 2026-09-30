@@ -1,0 +1,511 @@
+/* ─────────────────────────────────────────────────────────────
+   Layout — app shell: menubar, toolbar, workbench, dock, status.
+   ───────────────────────────────────────────────────────────── */
+
+#app {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-app);
+}
+
+/* ── Title / menu bar ────────────────────────────────────── */
+.menubar {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  flex: none;
+  background: var(--bg-panel-alt);
+  border-bottom: 1px solid var(--border);
+  padding: 0 8px;
+  gap: 4px;
+}
+.menubar .app-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 0 8px;
+  font-size: var(--font-size-ui);
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+}
+.menubar .app-title .app-sub {
+  font-weight: 400;
+  color: var(--text-faint);
+  font-size: var(--font-size-label);
+}
+.menubar .menu-btn {
+  height: 22px;
+  padding: 0 9px;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-size: var(--font-size-ui);
+}
+.menubar .menu-btn:hover,
+.menubar .menu-btn.open {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* ── Toolbar ─────────────────────────────────────────────── */
+.toolbar {
+  display: flex;
+  align-items: center;
+  height: 34px;
+  flex: none;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  padding: 0 8px;
+  gap: 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.toolbar::-webkit-scrollbar {
+  display: none;
+}
+.toolbar .tb-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  margin: 0 4px;
+  flex: none;
+}
+.toolbar .tb-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+.toolbar .tb-spacer {
+  flex: 1;
+}
+
+/* ── Workbench ───────────────────────────────────────────── */
+.workbench {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.center-col {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* ── Side panels ─────────────────────────────────────────── */
+.panel {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  flex: none;
+}
+.panel-left {
+  border-right: 1px solid var(--border);
+}
+.panel-right {
+  border-left: 1px solid var(--border);
+}
+.panel-bottom {
+  border-top: 1px solid var(--border);
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  height: 28px;
+  flex: none;
+  padding: 0 6px 0 10px;
+  background: var(--bg-panel-alt);
+  border-bottom: 1px solid var(--border);
+  gap: 6px;
+}
+.panel-header .panel-title {
+  flex: 1;
+  font-size: var(--font-size-label);
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.panel-header .collapse-btn {
+  color: var(--text-faint);
+}
+.panel-header .collapse-btn:hover {
+  color: var(--text);
+}
+
+.panel-body {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
+}
+.panel-body.pad {
+  padding: var(--space-3);
+}
+
+.panel-footer {
+  flex: none;
+  padding: 10px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+/* ── Collapsible sections (Inspector) ────────────────────── */
+.section {
+  border-bottom: 1px solid var(--border);
+}
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 26px;
+  padding: 0 8px;
+  color: var(--text-dim);
+  font-size: var(--font-size-label);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  text-align: left;
+}
+.section-header:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.02);
+}
+.section-header .lucide {
+  color: var(--text-faint);
+}
+.section-body {
+  padding: 8px 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.section.collapsed .section-body {
+  display: none;
+}
+.section.collapsed .section-header .chev {
+  transform: rotate(-90deg);
+}
+.section-header .chev {
+  transition: transform 0.1s;
+}
+
+/* ── Field rows ──────────────────────────────────────────── */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.field-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: var(--font-size-label);
+  color: var(--text-dim);
+}
+.field-label .info-btn {
+  color: var(--text-faint);
+  display: inline-flex;
+}
+.field-label .info-btn:hover {
+  color: var(--text-dim);
+}
+.field-sub {
+  font-size: 10px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+}
+.field-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  font-size: var(--font-size-label);
+  color: var(--warning);
+  line-height: 1.4;
+}
+.field-hint .lucide {
+  flex: none;
+  margin-top: 1px;
+}
+
+/* ── Splitters ───────────────────────────────────────────── */
+.splitter {
+  flex: none;
+  background: transparent;
+  position: relative;
+  z-index: 5;
+}
+.splitter-v {
+  width: 4px;
+  margin: 0 -2px;
+  cursor: col-resize;
+}
+.splitter-h {
+  height: 4px;
+  margin: -2px 0;
+  cursor: row-resize;
+}
+.splitter::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transition: background 0.1s;
+}
+.splitter:hover::after,
+.splitter.dragging::after {
+  background: var(--accent);
+  opacity: 0.6;
+}
+body.dragging-col {
+  cursor: col-resize;
+  user-select: none;
+}
+body.dragging-row {
+  cursor: row-resize;
+  user-select: none;
+}
+body.dragging-col *,
+body.dragging-row * {
+  pointer-events: none !important;
+}
+
+/* Collapsed panel → thin restore strip */
+.panel-rail {
+  width: 26px;
+  flex: none;
+  background: var(--bg-panel-alt);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 6px;
+  gap: 6px;
+  cursor: pointer;
+  border-right: 1px solid var(--border);
+}
+.panel-rail.right {
+  border-right: none;
+  border-left: 1px solid var(--border);
+}
+.panel-rail:hover {
+  background: var(--bg-hover);
+}
+.panel-rail .rail-label {
+  writing-mode: vertical-rl;
+  font-size: var(--font-size-label);
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.panel-rail .lucide {
+  color: var(--text-faint);
+}
+
+/* ── Viewport ────────────────────────────────────────────── */
+.viewport-wrap {
+  flex: 1;
+  position: relative;
+  min-height: 0;
+  min-width: 0;
+  background: var(--bg-app);
+  overflow: hidden;
+}
+.viewport-wrap canvas.webgl {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.viewport-wrap.measure-armed canvas.webgl {
+  cursor: crosshair;
+}
+
+.vp-overlay {
+  position: absolute;
+  pointer-events: none;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+.vp-stats {
+  top: 8px;
+  left: 8px;
+  background: rgba(26, 26, 26, 0.75);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 5px 8px;
+  line-height: 1.6;
+}
+.vp-stats .stat-row {
+  display: flex;
+  gap: 12px;
+  white-space: nowrap;
+}
+.vp-stats .stat-k {
+  color: var(--text-faint);
+  width: 44px;
+}
+.vp-stats .stat-v {
+  color: var(--text);
+}
+.vp-gizmo {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  width: 76px;
+  height: 76px;
+  pointer-events: none;
+}
+.vp-scalebar {
+  bottom: 10px;
+  right: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.vp-scalebar .sb-bar {
+  height: 4px;
+  border-left: 1px solid var(--text-dim);
+  border-right: 1px solid var(--text-dim);
+  border-bottom: 1px solid var(--text-dim);
+}
+.vp-scalebar .sb-label {
+  color: var(--text-dim);
+}
+.vp-measure-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+/* Empty / loading states */
+.vp-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  text-align: center;
+  pointer-events: none;
+}
+.vp-empty .empty-icon {
+  color: var(--text-faint);
+  opacity: 0.6;
+}
+.vp-empty .empty-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-dim);
+}
+.vp-empty .empty-hint {
+  font-size: var(--font-size-label);
+  color: var(--text-faint);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.vp-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: rgba(26, 26, 26, 0.55);
+  pointer-events: none;
+}
+.vp-loading .load-stage {
+  font-size: var(--font-size-ui);
+  color: var(--text);
+  background: var(--bg-panel-alt);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 6px 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ── Bottom dock ─────────────────────────────────────────── */
+.dock-header {
+  display: flex;
+  align-items: center;
+  height: 28px;
+  flex: none;
+  background: var(--bg-panel-alt);
+  border-bottom: 1px solid var(--border);
+  padding-right: 4px;
+}
+.dock-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Status bar ──────────────────────────────────────────── */
+.statusbar {
+  display: flex;
+  align-items: center;
+  height: 24px;
+  flex: none;
+  background: var(--bg-panel-alt);
+  border-top: 1px solid var(--border);
+  padding: 0 10px;
+  gap: 14px;
+  font-size: var(--font-size-label);
+  color: var(--text-dim);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.statusbar .st-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+.statusbar .st-item.mono {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-mono);
+}
+.statusbar .st-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  flex: none;
+}
+.statusbar .st-dot.ready {
+  background: var(--success);
+}
+.statusbar .st-dot.running {
+  background: var(--accent);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+.statusbar .st-dot.error {
+  background: var(--error);
+}
+.statusbar .st-spacer {
+  flex: 1;
+}
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
